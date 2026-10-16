@@ -175,7 +175,8 @@ class Storage:
     def _check_write_path(self, relative):
         p = self.path(relative)
         first = PurePosixPath(relative).parts[0]
-        if relative not in (self.yyp.name, self.yyp.with_suffix('.resource_order').name) and first not in {
+        if relative not in (self.yyp.name, self.yyp.with_suffix('.resource_order').name,
+                             'options/windows/options_windows.yy') and first not in {
                 'scripts', 'objects', 'rooms', 'sprites', 'sounds', 'shaders'}:
             raise ValueError('不是本服务支持的资源路径：' + relative)
         return p

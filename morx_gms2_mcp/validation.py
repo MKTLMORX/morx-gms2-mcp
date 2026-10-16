@@ -2,12 +2,18 @@
 from pathlib import PurePosixPath
 from .resources import KINDS, EVENT_STEMS, group_check, walk_layers
 from .animation import number
+from .display import WINDOWS_PATH, windows_settings, room_settings
 
 
 def validate(project):
     errors, warnings, assets, documents = [], [], [], {}
     try:
         meta = project.metadata()
+        if project.path(WINDOWS_PATH).is_file():
+            try:
+                windows_settings(project.read(WINDOWS_PATH))
+            except (ValueError, KeyError, TypeError, OSError) as exc:
+                errors.append(f'{WINDOWS_PATH}: {exc}')
         entries = meta['resources']
         folders = {f['folderPath']: f for f in meta.get('Folders', [])}
         if len(folders) != len(meta.get('Folders', [])):
@@ -94,6 +100,8 @@ def validate(project):
                         seen.add(ancestor['name'])
                         ancestor = documents[ancestor['path']].get('parentObjectId')
                 elif kind == 'GMRoom':
+                    if data.get('$GMRoom') == 'v1':
+                        room_settings(data)
                     instances, layers = [], set()
                     for layer in walk_layers(data['layers']):
                         if layer['name'].casefold() in layers:

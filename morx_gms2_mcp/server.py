@@ -25,6 +25,8 @@ def build_server(project_root: Path, writable=False):
             'resources': ['script', 'object', 'room', 'PNG sprite', 'PCM WAV sound', 'GLSL ES shader'],
             'sprite_editing': ['查询普通位图动画', '播放速度及单位', '自定义原点', '帧重排', '逐帧时长'],
             'sprite_editing_ide_verified': True,
+            'display_settings': ['Windows 显示名称与启动选项', '房间尺寸', '相机范围', '视口位置及尺寸'],
+            'display_settings_ide_verified': True,
             'limitations': ['不执行 IDE 操作或编译', '不支持删除或重命名资源', '不覆盖已有 GML 或事件',
                 '不创建字体、路径、时间线、序列或扩展资源', '多个文件整体非操作系统级原子事务',
                 '不增删精灵帧或编辑图像；复杂动画时间轴拒绝修改'],
@@ -39,6 +41,42 @@ def build_server(project_root: Path, writable=False):
     def inspect_resource(name: str) -> dict:
         """读取资源描述和代码文件哈希，供核对目标与外部编辑状态。"""
         return project.inspect_resource(name)
+
+    @mcp.tool(annotations=read)
+    def inspect_display_settings(room_name: str | None = None) -> dict:
+        """读取 Windows 显示选项及房间/相机/视口，分别返回文件 SHA-256。省略房间时读取首房间。
+        缺少平台文件或不支持的格式会标记，不自动创建。GUI 尺寸与运行时窗口控制不在本接口范围。
+        """
+        return project.inspect_display_settings(room_name)
+
+    @mcp.tool(annotations=change)
+    def configure_windows_display(title: str | None = None, start_fullscreen: bool | None = None,
+            borderless: bool | None = None, resizable: bool | None = None,
+            allow_fullscreen_switching: bool | None = None, display_cursor: bool | None = None,
+            vsync: bool | None = None, interpolate_pixels: bool | None = None,
+            expected_sha256: str | None = None, dry_run: bool = True) -> dict:
+        """修改现有 GMWindowsOptions v2 的显示名称、启动全屏、边框、调整窗口大小许可等。null 保留。
+        只改指定 Windows 显示字段；不创建平台配置，不修改沙箱、安装器、图标或其他平台。
+        borderless 仅去除边框，不是无边框全屏模式。建议传查询返回的 windows.sha256 防止过期写入。
+        """
+        return project.configure_windows_display(title, start_fullscreen, borderless, resizable,
+            allow_fullscreen_switching, display_cursor, vsync, interpolate_pixels, expected_sha256, dry_run)
+
+    @mcp.tool(annotations=change)
+    def configure_room_display(room_name: str, room_width: int | None = None, room_height: int | None = None,
+            enable_views: bool | None = None, view_index: int = 0, visible: bool | None = None,
+            camera_x: int | None = None, camera_y: int | None = None,
+            camera_width: int | None = None, camera_height: int | None = None,
+            viewport_x: int | None = None, viewport_y: int | None = None,
+            viewport_width: int | None = None, viewport_height: int | None = None,
+            expected_sha256: str | None = None, dry_run: bool = True) -> dict:
+        """配置非继承 GMRoom v1 的房间大小及一个视口（0～7）。null 保留，不联动修改其他尺寸。
+        相机范围与视口分开设置。启用时至少一个视口须 visible=true；不自动关闭其他视口。
+        初始窗口取决于首房间；不改 GUI 尺寸或运行时代码。建议传查询返回的 room.sha256。
+        """
+        return project.configure_room_display(room_name, room_width, room_height, enable_views, view_index,
+            visible, camera_x, camera_y, camera_width, camera_height, viewport_x, viewport_y,
+            viewport_width, viewport_height, expected_sha256, dry_run)
 
     @mcp.tool(annotations=add)
     def ensure_group(group: str, dry_run: bool = True) -> dict:

@@ -9,6 +9,8 @@ from PIL import Image
 from . import schemas
 from .storage import Storage, digest, encode, parse_yy
 from .animation import number, timeline, retime
+from .display import WINDOWS_PATH, WINDOWS_FLAGS, VIEW_FIELDS, windows_settings, room_settings, check_expected
+from .display import integer, boolean, title_check
 
 KINDS = {'scripts': 'GMScript', 'objects': 'GMObject', 'rooms': 'GMRoom',
          'sprites': 'GMSprite', 'sounds': 'GMSound', 'shaders': 'GMShader'}
@@ -95,6 +97,109 @@ class Edit:
 class Project(Storage):
     def metadata(self):
         return self.read(self.yyp.name)
+
+    def inspect_display_settings(self, room_name=None):
+        with self.lock:
+            edit = Edit(self)
+            raw = edit.raw(WINDOWS_PATH)
+            windows = {'path': WINDOWS_PATH, 'available': raw is not None}
+            if raw is not None:
+                windows['sha256'] = digest(raw)
+                try:
+                    windows.update(supported=True, settings=windows_settings(edit.load(WINDOWS_PATH)))
+                except ValueError as exc:
+                    windows.update(supported=False, reason=str(exc))
+            meta = edit.load(self.yyp.name)
+            order = meta.get('RoomOrderNodes', [])
+            start_room = order[0]['roomId']['name'] if order else None
+            room_name = start_room if room_name is None else room_name
+            room = None
+            if room_name is not None:
+                ref, data = self._ref(edit, room_name, 'rooms')
+                room = {'name': room_name, 'path': ref['path'], 'sha256': digest(edit.raw(ref['path'])),
+                        'is_start_room': room_name == start_room}
+                try:
+                    room.update(supported=True, settings=room_settings(data))
+                except ValueError as exc:
+                    room.update(supported=False, reason=str(exc))
+            return {'project': str(self.yyp), 'writable': self.writable, 'windows': windows,
+                'start_room': start_room, 'room': room,
+                'notes': ['初始窗口取决于首房间及其可见视口，操作系统或运行时代码可能调整结果',
+                    '房间尺寸、相机范围、视口尺寸及 GUI 尺寸分别管理；本工具不注入运行时代码',
+                    '继承房间仅报告文件内的本地记录值，不解析继承后的有效配置',
+                    'borderless 仅去除窗口边框，不代表铺满显示器的无边框全屏']}
+
+    def configure_windows_display(self, title=None, start_fullscreen=None, borderless=None, resizable=None,
+            allow_fullscreen_switching=None, display_cursor=None, vsync=None, interpolate_pixels=None,
+            expected_sha256=None, dry_run=True):
+        values = {'start_fullscreen': start_fullscreen, 'borderless': borderless, 'resizable': resizable,
+            'allow_fullscreen_switching': allow_fullscreen_switching, 'display_cursor': display_cursor,
+            'vsync': vsync, 'interpolate_pixels': interpolate_pixels}
+        if title is not None:
+            title_check(title)
+        for name, value in values.items():
+            if value is not None:
+                boolean(value, name)
+        with self.lock:
+            edit = Edit(self)
+            data = edit.load(WINDOWS_PATH)
+            check_expected(edit.raw(WINDOWS_PATH), expected_sha256)
+            windows_settings(data)
+            original = encode(data)
+            if title is not None:
+                data['option_windows_display_name'] = title
+            for name, value in values.items():
+                if value is not None:
+                    data[WINDOWS_FLAGS[name]] = value
+            if encode(data) != original:
+                edit.save(WINDOWS_PATH, data)
+            result = edit.commit(dry_run)
+            result['warnings'] = ['无边框窗口下，允许手动调整窗口大小不会生效'] if (
+                data[WINDOWS_FLAGS['borderless']] and data[WINDOWS_FLAGS['resizable']]) else []
+            return result
+
+    def configure_room_display(self, room_name, room_width=None, room_height=None, enable_views=None,
+            view_index=0, visible=None, camera_x=None, camera_y=None, camera_width=None, camera_height=None,
+            viewport_x=None, viewport_y=None, viewport_width=None, viewport_height=None,
+            expected_sha256=None, dry_run=True):
+        integer(view_index, 'view_index', 0, 7)
+        values = {'camera_x': camera_x, 'camera_y': camera_y, 'camera_width': camera_width,
+            'camera_height': camera_height, 'viewport_x': viewport_x, 'viewport_y': viewport_y,
+            'viewport_width': viewport_width, 'viewport_height': viewport_height}
+        for name, value in {'room_width': room_width, 'room_height': room_height, **values}.items():
+            if value is not None:
+                minimum = -(2**31) if name in ('camera_x', 'camera_y') else 0 if name in ('viewport_x', 'viewport_y') else 1
+                maximum = 2**31 - 1 if name in ('camera_x', 'camera_y') else 32768
+                integer(value, name, minimum, maximum)
+        for name, value in (('enable_views', enable_views), ('visible', visible)):
+            if value is not None:
+                boolean(value, name)
+        with self.lock:
+            edit = Edit(self)
+            ref, data = self._ref(edit, room_name, 'rooms')
+            check_expected(edit.raw(ref['path']), expected_sha256)
+            room_settings(data)
+            view = data['views'][view_index]
+            if (data.get('parentRoom') or data['roomSettings']['inheritRoomSettings']
+                    or data['viewSettings']['inheritViewSettings'] or view['inherit']):
+                raise ValueError('暂不修改继承房间、继承显示设置或选中的继承视口')
+            original = encode(data)
+            for field, value in (('Width', room_width), ('Height', room_height)):
+                if value is not None:
+                    data['roomSettings'][field] = value
+            if enable_views is not None:
+                data['viewSettings']['enableViews'] = enable_views
+            if visible is not None:
+                view['visible'] = visible
+            for name, value in values.items():
+                if value is not None:
+                    view[VIEW_FIELDS[name]] = value
+            room_settings(data)
+            if data['viewSettings']['enableViews'] and not any(v['visible'] for v in data['views']):
+                raise ValueError('启用视口后至少须有一个可见视口；请显式设置 visible=true')
+            if encode(data) != original:
+                edit.save(ref['path'], data)
+            return edit.commit(dry_run)
 
     def _group(self, edit, group):
         parts = group_check(group)

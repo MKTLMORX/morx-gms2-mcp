@@ -7,6 +7,9 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from PIL import Image
 from tests.test_core import ProjectFixture
+from tests.test_display import windows_fixture
+from morx_gms2_mcp.display import WINDOWS_PATH
+from morx_gms2_mcp.storage import encode
 
 
 class ProtocolTests(ProjectFixture):
@@ -16,6 +19,13 @@ class ProtocolTests(ProjectFixture):
         self.project.import_sprite('spr_protocol', [str(png), str(png)])
         sprite_file = self.root / 'sprites/spr_protocol/spr_protocol.yy'
         original = sprite_file.read_bytes()
+        self.project.create_room('rm_display_protocol', 800, 450)
+        self.project.set_start_room('rm_display_protocol')
+        windows_file = self.root / WINDOWS_PATH
+        windows_file.parent.mkdir(parents=True)
+        windows_file.write_bytes(encode(windows_fixture()))
+        room_file = self.root / 'rooms/rm_display_protocol/rm_display_protocol.yy'
+        original_windows, original_room = windows_file.read_bytes(), room_file.read_bytes()
         async def run():
             args = ['-m', 'morx_gms2_mcp', 'serve', '--project', str(self.root)]
             if writable:
@@ -27,7 +37,7 @@ class ProtocolTests(ProjectFixture):
                     init = await session.initialize()
                     self.assertEqual(init.serverInfo.name, 'morx-gms2-mcp')
                     tools = (await session.list_tools()).tools
-                    self.assertEqual(len(tools), 21)
+                    self.assertEqual(len(tools), 24)
                     self.assertTrue({'inspect_sprite', 'configure_sprite', 'set_sprite_animation'}
                                     .issubset({tool.name for tool in tools}))
                     for tool in tools:
@@ -74,6 +84,35 @@ class ProtocolTests(ProjectFixture):
                         await call('configure_sprite', {**options, 'dry_run': False}, True)
                         await call('set_sprite_animation', {**animation, 'dry_run': False}, True)
                     self.assertEqual(sprite_file.read_bytes(), original)
+                    display = await call('inspect_display_settings', {})
+                    self.assertTrue(display['windows']['supported'])
+                    self.assertTrue(display['room']['is_start_room'])
+                    windows_options = {'title': '协议显示测试', 'resizable': True,
+                                       'expected_sha256': display['windows']['sha256']}
+                    room_options = {'room_name': 'rm_display_protocol', 'view_index': 1,
+                        'enable_views': True, 'visible': True, 'camera_width': 320, 'camera_height': 180,
+                        'viewport_width': 640, 'viewport_height': 360,
+                        'expected_sha256': display['room']['sha256']}
+                    self.assertTrue((await call('configure_windows_display', windows_options))['dry_run'])
+                    self.assertTrue((await call('configure_room_display', room_options))['dry_run'])
+                    self.assertEqual(windows_file.read_bytes(), original_windows)
+                    self.assertEqual(room_file.read_bytes(), original_room)
+                    if writable:
+                        result = await call('configure_windows_display', {**windows_options, 'dry_run': False})
+                        changed = await call('inspect_display_settings', {})
+                        self.assertEqual(changed['windows']['settings']['title'], '协议显示测试')
+                        await call('configure_windows_display', {**windows_options, 'dry_run': False}, True)
+                        await call('restore_backup', {'transaction_id': result['transaction'], 'dry_run': False})
+                        result = await call('configure_room_display', {**room_options, 'dry_run': False})
+                        changed = await call('inspect_display_settings', {'room_name': 'rm_display_protocol'})
+                        self.assertEqual(changed['room']['settings']['views'][1]['camera']['width'], 320)
+                        self.assertEqual(changed['room']['settings']['views'][1]['viewport']['width'], 640)
+                        await call('restore_backup', {'transaction_id': result['transaction'], 'dry_run': False})
+                    else:
+                        await call('configure_windows_display', {**windows_options, 'dry_run': False}, True)
+                        await call('configure_room_display', {**room_options, 'dry_run': False}, True)
+                    self.assertEqual(windows_file.read_bytes(), original_windows)
+                    self.assertEqual(room_file.read_bytes(), original_room)
                     self.assertTrue((await call('inspect_project', {}))['ok'])
         asyncio.run(run())
 

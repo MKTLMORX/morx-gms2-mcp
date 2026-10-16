@@ -25,8 +25,9 @@ async def check(project, writable):
                 if response.isError:
                     raise RuntimeError(str(response.content))
                 result[name] = json.loads(response.content[0].text)
-            result['ok'] = len(names) == 21 and {'inspect_sprite', 'configure_sprite',
-                'set_sprite_animation'}.issubset(names) and result['inspect_project']['ok']
+            result['ok'] = len(names) == 24 and {'inspect_sprite', 'configure_sprite', 'set_sprite_animation',
+                'inspect_display_settings', 'configure_windows_display', 'configure_room_display'
+                }.issubset(names) and result['inspect_project']['ok']
             return result
 
 

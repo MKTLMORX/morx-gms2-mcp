@@ -18,12 +18,13 @@ Local MCP tools for GameMaker Studio 2 resource creation and management, with dr
 | 房间与实例 | 创建房间和实例图层，放置物体，设置启动房间 |
 | 美术与音频 | 导入多帧 PNG、PCM WAV，创建 GLSL ES 着色器 |
 | 精灵动画 | 查询已有位图精灵，调整速度、原点、帧顺序和逐帧时长 |
+| 显示设置 | Windows 启动选项，以及独立的房间、相机和视口配置 |
 | 项目结构 | 创建多级中文分组，移动虚拟分组，校验资源引用 |
 | 修改与恢复 | 默认预览、固定项目绑定、冲突检测、事务备份与撤销 |
 
-**21 个工具 · 本地 stdio · 默认只读 · MIT**
+**24 个工具 · 本地 stdio · 默认只读 · MIT**
 
-当前源码为 **0.2.0.dev1 开发版**，尚未发布；新增精灵编辑功能已在下文指定 GameMaker 版本完成隔离项目保存、编译及运行验收。
+当前源码为 **0.2.0.dev2 开发版**，尚未发布；精灵编辑与显示设置已完成下文指定版本的隔离项目保存、编译及运行验收。
 
 项目展示名为 **MORX GMS2 MCP**，仓库、安装包及命令名为 `morx-gms2-mcp`，Python 模块为 `morx_gms2_mcp`。这是独立社区项目；GMS2 名称不代表所有历史版本均已兼容，实际验收范围见下文。
 
@@ -103,6 +104,8 @@ claude mcp get morx-gms2-mcp
 
 > 查询 spr_demo 的动画，将帧倒序，让第一帧停留更久，先预览修改。
 
+> 查询启动房间和 Windows 显示设置，预览将相机设为 320×180、视口设为 960×540，并允许调整窗口大小。
+
 > 列出备份，预览撤销最近一次资源创建会影响哪些文件。
 
 ## 使用流程与写入保护
@@ -127,13 +130,16 @@ claude mcp get morx-gms2-mcp
 ## 工具清单
 
 <details>
-<summary>展开全部 21 个工具</summary>
+<summary>展开全部 24 个工具</summary>
 
 | 工具 | 功能 |
 | --- | --- |
 | `server_info` | 版本、目标、写入模式、支持范围 |
 | `inspect_project` | 资源、分组、引用、房间顺序和帧结构校验 |
 | `inspect_resource` | 资源描述及源文件哈希 |
+| `inspect_display_settings` | Windows 选项及指定房间/首房间的尺寸、相机和视口 |
+| `configure_windows_display` | 显示名称、启动全屏、边框、大小调整许可等 Windows 选项 |
+| `configure_room_display` | 独立调整房间大小、一个相机及其视口 |
 | `ensure_group` | 创建多级虚拟分组 |
 | `create_script` | 创建脚本与初始 GML |
 | `create_object` | 创建物体 |
@@ -181,14 +187,39 @@ PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最
 
 格式语义参考 GameMaker 官方[精灵编辑器](https://manual.gamemaker.io/monthly/en/The_Asset_Editors/Sprites.htm)和[关键帧结构](https://manual.gamemaker.io/lts/en/GameMaker_Language/GML_Reference/Asset_Management/Sequences/Sequence_Structs/The_Keyframe_Struct.htm)；结构检查与自动测试不替代 IDE 验收。
 
+### 配置项目显示
+
+`inspect_display_settings` 分别返回 `windows` 和 `room` 的文件路径、支持状态及 `sha256`。省略 `room_name` 时读取启动房间；缺少 Windows 平台文件时标记不可用，不自动创建。继承房间的查询值仅是本地记录，不解析继承结果。
+
+`configure_windows_display` 仅修改现有 `GMWindowsOptions v2` 的以下字段，null 保留：`title`、`start_fullscreen`、`borderless`、`resizable`、`allow_fullscreen_switching`、`display_cursor`、`vsync`、`interpolate_pixels`。`title` 是 Windows 平台显示名称；运行时代码可能覆盖窗口标题或其他启动设置。`borderless` 只去除边框，不等于铺满显示器的无边框全屏；无边框下窗口手动拉伸不会生效，两个开关同时为 true 时返回提示。缩放策略、安装器、图标、文件系统沙箱及其他平台配置不修改。
+
+`configure_room_display` 针对非继承 `GMRoom v1`：
+
+| 参数 | 含义 |
+| --- | --- |
+| `room_width` / `room_height` | 房间世界尺寸，不联动改变相机或视口 |
+| `camera_x` / `camera_y` / `camera_width` / `camera_height` | 相机在房间中的位置和可见范围 |
+| `viewport_x` / `viewport_y` / `viewport_width` / `viewport_height` | 视口在输出画布上的位置和尺寸 |
+| `view_index` / `visible` / `enable_views` | 操作 0～7 中的一个视口、是否可见，以及房间是否启用视口 |
+
+尺寸须为 1～32768 的整数；视口位置为非负整数，可见视口的右/下边界不得超过 32768。null 保留原值，不关闭其他视口；启用后至少一个视口必须可见。继承房间、继承房间设置、继承视口设置或选中的继承视口均拒绝写入，不自动解除继承。
+
+例如预览将 `rm_demo` 的相机设为 320×180、视口设为 960×540：
+
+```json
+{"room_name":"rm_demo","enable_views":true,"view_index":0,"visible":true,"camera_width":320,"camera_height":180,"viewport_width":960,"viewport_height":540,"expected_sha256":"<查询返回的 room.sha256>","dry_run":true}
+```
+
+修改 Windows 选项时传入 `windows.sha256`，修改房间时使用 `room.sha256`；预览和执行保留同一哈希。初始窗口大小由首房间及其可见视口决定，实际结果可能受操作系统和运行时代码影响；仅修改后续房间不会自动重设已运行的窗口。GUI 尺寸、运行时窗口切换、无边框全屏模式和应用表面手动调整仍由 GML 管理，本工具不注入代码。参考官方 [Windows 选项](https://manual.gamemaker.io/lts/en/Settings/Game_Options/Windows.htm)、[房间和视口](https://manual.gamemaker.io/lts/en/The_Asset_Editors/Room_Properties/Room_Properties.htm)。
+
 ## 兼容与限制
 
 | 验证项 | 已观察结果 |
 | --- | --- |
-| 自动测试 | 开发版提供 39 项测试；0.1.1 的 25 项测试在 Windows / Python 3.10、3.12 的 [CI 已通过](https://github.com/MKTLMORX/morx-gms2-mcp/actions/runs/38952755796)；新增编辑功能尚无公开 CI 结果 |
+| 自动测试 | 开发版 54 项本地测试通过；Windows / Python 3.10、3.12 由 [CI](https://github.com/MKTLMORX/morx-gms2-mcp/actions/workflows/tests.yml) 持续检查 |
 | 打包 | wheel、sdist 和公开源码 ZIP 构建通过 |
 | MCP | 真实 stdio 握手、工具发现、预览、写入、错误及恢复测试通过 |
-| IDE | GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23：原资源创建及新增精灵编辑的 Windows VM 隔离场景编译运行通过 |
+| IDE | GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23：资源创建、精灵编辑、窗口/启动全屏/无边框的 Windows VM 隔离场景编译运行通过 |
 
 <details>
 <summary>查看 IDE 验收细节</summary>
@@ -199,13 +230,16 @@ PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最
 - IDE 打开期间新增脚本自动出现；其他资源类型与所有编辑冲突场景的热加载尚未逐一验证。
 - 0.2.0.dev1：IDE 正确显示蓝/绿/红重排、3/1/2 时间轴长度、6 FPS 和自定义原点 12,12；IDE 保存后的精灵数据语义保持一致，PNG 哈希未改变。
 - 新动画在 Windows VM 实际运行；每组连续采样 180 个绘制步，读取精灵内部像素。按红/绿/蓝统计，基准 1/1/1 得到 59/60/61，重排并设为 3/1/2 得到 60/30/90，小数时长 1.5/1/0.5 得到 30/61/89，按游戏帧速度 0.1 的 3/1/2 得到 60/30/90，与预期相符（最大偏差 1 个绘制步）。此结果不扩展为其他平台、复杂轨道或任意参数的完整兼容保证。
+- 0.2.0.dev2：三个独立显示项目均编译运行通过，采样确认房间 1600×900、相机 320×180（40,20）、视口及 GUI 960×540。普通窗口与无边框窗口初始均为 960×540；启动全屏为该测试显示器的 1920×1080。中文窗口标题、边框状态和隐藏光标返回值正确。
+- 允许调整大小的窗口可最大化，运行时窗口变为 1920×991，GUI 仍为 960×540。三个房间经 IDE 实际保存后数据语义一致；普通窗口项目的 Windows 选项也完成实际回写和语义比对。垂直同步、插值仅核对配置，未测量帧时序或图像质量；全屏切换快捷键未实测。
 
 </details>
 
 **当前不包含的能力：**
 
 - 不控制 IDE、不自动编译、不创建新项目；不提供资源删除/重命名、已有事件覆盖、字体/路径/时间线/序列/扩展创建、OGG/MP3 导入。
-- 暂不提供精灵增删帧、缩放、裁剪或调色，以及项目窗口/全屏/标题等设置接口；已有精灵动画编辑仅覆盖上文限定的时间轴结构。
+- 暂不提供精灵增删帧、缩放、裁剪或调色；已有精灵动画编辑仅覆盖上文限定的时间轴结构。
+- 显示配置首轮仅覆盖 Windows v2 选项和非继承房间；不封装其他平台、GUI 尺寸、运行时代码或无边框全屏切换。
 - 结构校验只覆盖实现支持的关系，不是 GameMaker 官方完整格式验证器。其他 IDE 版本、平台与复杂现有项目需自行验证。
 
 ## 开发与发布
@@ -226,7 +260,7 @@ python scripts/build_release.py
 
 ## English quick start
 
-MORX GMS2 MCP is an independent local stdio server for GameMaker resource workflows. It exposes 21 tools for scripts, objects, events, rooms, PNG sprites, PCM WAV audio, GLSL ES shaders, virtual groups and transaction rollback. The current source is the unreleased 0.2.0.dev1 development version. Sprite editing passed isolated IDE save and Windows VM runtime checks on IDE 2026.0.0.16 / Runtime 2026.0.0.23, including pixel samples for fractional durations and both speed units.
+MORX GMS2 MCP is an independent local stdio server for GameMaker resource workflows. It exposes 24 tools for resources, sprite animation, Windows startup display options, room cameras/viewports and transaction rollback. The current source is the unreleased 0.2.0.dev2 development version. Sprite editing and display settings passed isolated IDE save and Windows VM runtime checks on IDE 2026.0.0.16 / Runtime 2026.0.0.23. Windowed, startup fullscreen and borderless cases were checked; this does not establish compatibility with other IDE versions or platforms.
 
 1. Clone this repository, create a Python 3.10+ virtual environment, and install with `python -m pip install .` inside that environment. No official PyPI release is available yet.
 2. Create and save a test project in GameMaker. Run `python -m morx_gms2_mcp bind --project <project>` and then `check --project <project>`.
@@ -235,7 +269,9 @@ MORX GMS2 MCP is an independent local stdio server for GameMaker resource workfl
 
 Use `inspect_sprite` before `configure_sprite` or `set_sprite_animation`. Reordering requires every existing frame ID exactly once; durations are positive animation timeline units in the resulting order, not seconds. Omitted durations stay attached to their frames. Pass the returned `sha256` as `expected_sha256` to reject stale edits. Only ordinary continuous bitmap timelines are supported; events and moments prevent retiming. PNG files are preserved. Reordering changes image indices.
 
-Existing GML and events are not overwritten. Do not save in the IDE while the server is writing. Multi-file transactions are not fully atomic. This server does not control or compile the IDE, add/remove sprite frames, edit image pixels, or change window/fullscreen project settings. See the compatibility table above for tested versions.
+Use `inspect_display_settings` before `configure_windows_display` or `configure_room_display`. Windows edits require an existing GMWindowsOptions v2 file. Room, camera and viewport dimensions are independent; enabling views requires at least one visible viewport. Inherited room display settings are not edited. Use the corresponding Windows or room hash to reject stale writes. Borderless windows and borderless fullscreen are distinct; runtime code and the OS may override startup behavior. GUI sizes and runtime GML are not edited.
+
+Existing GML and events are not overwritten. Do not save in the IDE while the server is writing. Multi-file transactions are not fully atomic. This server does not control or compile the IDE, add/remove sprite frames, edit image pixels, or configure other platform display options. See the compatibility table above for tested versions.
 
 Licensed under [MIT](LICENSE). Contributions and sanitized bug reports are welcome.
 

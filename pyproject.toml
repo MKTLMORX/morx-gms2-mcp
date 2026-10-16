@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "morx-gms2-mcp"
-version = "0.2.0.dev1"
+version = "0.2.0.dev2"
 description = "MORX GMS2 MCP: project-bound GameMaker Studio 2 resource tools over stdio"
 readme = "README.md"
 requires-python = ">=3.10"

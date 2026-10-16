@@ -7,3 +7,16 @@ dist/
 .codex/
 .mcp.json
 .mcp-demo-inputs/
+.env
+.env.*
+!.env.example
+.claude/
+CLAUDE.local.md
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+.mcp-probe-project
+.mcp-backups/
+.gm_cache/

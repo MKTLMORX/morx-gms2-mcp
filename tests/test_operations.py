@@ -103,6 +103,13 @@ class OperationTests(ProjectFixture):
         with self.assertRaises(ValueError):
             Project(self.root)
 
+    def test_binding_normalizes_project_path(self):
+        (self.root / '.mcp-probe-project').unlink()
+        result = bind(self.root / 'rooms' / '..')
+        self.assertEqual(Path(result['bound']), self.project.yyp)
+        self.assertEqual(bind(self.root), result)
+        self.assertEqual(Project(self.root).yyp, self.project.yyp)
+
     def test_path_escape_and_reserved_write_targets(self):
         for value in ('../outside', '/outside', 'C:/outside', 'scripts\\bad'):
             with self.assertRaises(ValueError):

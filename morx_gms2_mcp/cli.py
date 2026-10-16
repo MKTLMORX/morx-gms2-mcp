@@ -13,6 +13,8 @@ def root_path(value):
 
 
 def bind(root):
+    # 与服务端统一规范路径，兼容 Windows 短路径及包含 .. 的调用路径。
+    root = Path(root).resolve(strict=True)
     if any(p.casefold() == '参考项目' for p in root.parts):
         raise ValueError('参考项目只读，拒绝绑定')
     projects = list(root.glob('*.yyp'))

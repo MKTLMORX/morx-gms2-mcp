@@ -1,11 +1,14 @@
 """只按公开源码白名单打包，避免带入工作区和个人游戏内容。"""
 import hashlib
 import re
+import sys
 from pathlib import Path
 import zipfile
 
 
 def main():
+    # 英文 Windows 的输出编码可能为 cp1252；日志不可使已成功的打包失败。
+    sys.stdout.reconfigure(errors='backslashreplace')
     root = Path(__file__).resolve().parents[1]
     version = re.search(r'__version__\s*=\s*[\'"]([^\'"]+)',
                         (root / 'morx_gms2_mcp/__init__.py').read_text(encoding='utf-8')).group(1)

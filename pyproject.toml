@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "morx-gms2-mcp"
+version = "0.1.0"
+description = "MORX GMS2 MCP: project-bound GameMaker Studio 2 resource tools over stdio"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["mcp>=1.11,<2", "Pillow>=12.3,<13"]
+
+[project.urls]
+Repository = "https://github.com/MKTLMORX/morx-gms2-mcp"
+Issues = "https://github.com/MKTLMORX/morx-gms2-mcp/issues"
+
+[project.scripts]
+morx-gms2-mcp = "morx_gms2_mcp.cli:main"
+
+[tool.setuptools]
+packages = ["morx_gms2_mcp"]

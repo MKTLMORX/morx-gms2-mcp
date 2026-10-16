@@ -4,11 +4,13 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**通过 AI 助手创建和管理 GameMaker 资源，编辑精灵动画、配置显示，并在写入前预览修改。**
+**让 AI 助手参与 GameMaker 项目的制作、检查与迭代。**
 
-Local MCP tools for GameMaker resources, sprite animation and display settings. Preview changes before writing, with backups and rollback. Works with Codex and Claude Code.
+A local MCP foundation for AI-assisted GameMaker development: understand projects, create and edit resources, and iterate using test feedback. Works with Codex and Claude Code.
 
-[快速开始](#快速开始) · [连接客户端](#连接客户端) · [使用示例](#使用示例) · [工具清单](#工具清单) · [适用范围](#适用范围) · [English](#english-quick-start)
+[开发工作流](#开发工作流) · [快速开始](#快速开始) · [连接客户端](#连接客户端) · [使用示例](#使用示例) · [工具清单](#工具清单) · [适用范围](#适用范围) · [English](#english-quick-start)
+
+MORX GMS2 MCP 为 AI 助手提供操作 GameMaker 项目的工具接口。让助手先理解项目结构，再制作资源、调整动画与显示设置，并根据游戏运行反馈继续修改。修改可以先预览，写入后保留备份，方便检查和撤销。
 
 ## 能做什么
 
@@ -24,7 +26,18 @@ Local MCP tools for GameMaker resources, sprite animation and display settings. 
 
 **24 个工具 · 本地 stdio · 默认只读 · MIT**
 
-服务直接读写绑定项目的资源文件，无需保持 GameMaker 运行。资源修改后，在 IDE 中打开项目并运行游戏，检查实际效果。
+## 开发工作流
+
+将需求交给助手，按“理解项目 → 制作与配置 → 运行观察 → 调整并验证”推进。AI 客户端负责理解需求和组织工具调用，MCP 负责执行项目操作。
+
+| 环节 | 使用方式 |
+| --- | --- |
+| 理解项目 | 查询资源、分组、引用、动画、房间和相机配置，确定修改目标 |
+| 制作与配置 | 创建资源和 GML 事件，编辑动画及显示设置，先预览再写入 |
+| 运行观察 | 在 GameMaker 中运行游戏，向助手提供截图、日志或测试结果；也可搭配客户端的独立运行与截图工具 |
+| 调整并验证 | 根据反馈继续修改资源或 GML，再次运行检查；需要时撤销最近的变更 |
+
+本仓库提供的接口覆盖项目文件和资源操作，无需保持 GameMaker 运行。游戏启动、画面获取、实时变量和断点调试需要另行使用 GameMaker 或客户端的相应工具。已有 GML 由客户端文件编辑工具修改，资源和配置修改由本服务执行。仅安装本 MCP 不会使助手自动获得游戏画面或调试器连接。
 
 ## 快速开始
 
@@ -231,7 +244,9 @@ PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最
 
 ## English quick start
 
-MORX GMS2 MCP connects AI assistants to GameMaker project files through 24 local stdio tools. Create resources, edit sprite animation, configure Windows display settings and room cameras/viewports, and preview changes before writing. Each write includes a backup for rollback.
+MORX GMS2 MCP provides a local tool foundation for AI-assisted GameMaker development. Let an assistant inspect your project, create resources, adjust animation and display settings, and refine the result using feedback from playtests. It exposes 24 stdio tools with previews, backups and rollback.
+
+Use an inspect → author → run and observe → adjust workflow. The AI client coordinates the work; this server handles project files and resources. Running the game, capturing its viewport and inspecting live variables require separate GameMaker or client tools. Existing GML can be edited with the client's file tools. Installing this server alone does not connect an assistant to the running game or its debugger.
 
 1. Clone this repository, create a Python 3.10+ virtual environment, and install with `python -m pip install .` inside that environment. Use this repository as the installation source; there is no official PyPI package.
 2. Create and save a test project in GameMaker. Run `python -m morx_gms2_mcp bind --project <project>` and then `check --project <project>`.

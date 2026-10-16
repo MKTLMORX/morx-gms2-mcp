@@ -17,10 +17,13 @@ Local MCP tools for GameMaker Studio 2 resource creation and management, with dr
 | 脚本与物体 | 创建脚本、物体和常用事件，配置精灵引用、父物体及常驻状态 |
 | 房间与实例 | 创建房间和实例图层，放置物体，设置启动房间 |
 | 美术与音频 | 导入多帧 PNG、PCM WAV，创建 GLSL ES 着色器 |
+| 精灵动画 | 查询已有位图精灵，调整速度、原点、帧顺序和逐帧时长 |
 | 项目结构 | 创建多级中文分组，移动虚拟分组，校验资源引用 |
 | 修改与恢复 | 默认预览、固定项目绑定、冲突检测、事务备份与撤销 |
 
-**18 个工具 · 本地 stdio · 默认只读 · MIT**
+**21 个工具 · 本地 stdio · 默认只读 · MIT**
+
+当前源码为 **0.2.0.dev1 开发版**，尚未发布；新增精灵编辑功能已在下文指定 GameMaker 版本完成隔离项目保存、编译及运行验收。
 
 项目展示名为 **MORX GMS2 MCP**，仓库、安装包及命令名为 `morx-gms2-mcp`，Python 模块为 `morx_gms2_mcp`。这是独立社区项目；GMS2 名称不代表所有历史版本均已兼容，实际验收范围见下文。
 
@@ -98,6 +101,8 @@ claude mcp get morx-gms2-mcp
 
 > 将我提供的两张等尺寸 PNG 导入为 spr_demo，设置播放速度和原点。
 
+> 查询 spr_demo 的动画，将帧倒序，让第一帧停留更久，先预览修改。
+
 > 列出备份，预览撤销最近一次资源创建会影响哪些文件。
 
 ## 使用流程与写入保护
@@ -122,7 +127,7 @@ claude mcp get morx-gms2-mcp
 ## 工具清单
 
 <details>
-<summary>展开全部 18 个工具</summary>
+<summary>展开全部 21 个工具</summary>
 
 | 工具 | 功能 |
 | --- | --- |
@@ -140,6 +145,9 @@ claude mcp get morx-gms2-mcp
 | `place_object` | 放入实例并登记创建顺序 |
 | `set_start_room` | 调整启动房间 |
 | `import_sprite` | 复制等尺寸 PNG 帧并创建可编辑精灵 |
+| `inspect_sprite` | 查询帧 ID、顺序、时长、速度、原点及描述文件哈希 |
+| `configure_sprite` | 修改已有位图精灵的速度、速度单位及自定义原点 |
+| `set_sprite_animation` | 重排现有帧、设置逐帧时长，不修改 PNG |
 | `import_sound` | 复制 PCM WAV 并创建声音 |
 | `create_shader` | 创建 GLSL ES 顶点/片段源文件 |
 | `list_backups` | 查看事务及状态 |
@@ -153,14 +161,34 @@ claude mcp get morx-gms2-mcp
 
 PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最多 8192。WAV 最多 128 MiB，单/双声道，8/16/24 位 PCM。原始导入文件不修改。`configure_object` 中 null 表示保留，sprite/parent 空字符串表示清空。
 
+### 编辑已有精灵动画
+
+先用 `inspect_sprite` 取得帧 ID 和描述文件 `sha256`。`configure_sprite` 的 `speed_type` 为 `frames_per_second` 或 `frames_per_game_frame`，null 保留现有值；设置任一原点坐标会切换为自定义原点，另一坐标保持原值，允许原点位于图像外。
+
+`set_sprite_animation` 的 `frame_order` 必须恰好包含每个现有帧 ID 一次，不接受帧索引、不增删帧。`frame_durations` 按**结果帧顺序**提供有限正数，单位是动画时间轴长度，不是秒。例如速度为 10 FPS 时，长度 2 对应 0.2 秒；如果采用每游戏帧速度单位，实际秒数还取决于游戏帧率。省略顺序则保持当前顺序；省略时长则每帧携带自己的原时长参与重排。
+
+例如，查询到三个帧 ID 后，可预览倒序并调整时长（替换占位值）：
+
+```json
+{"name":"spr_demo","frame_order":["<第三帧 ID>","<第二帧 ID>","<第一帧 ID>"],"frame_durations":[2,1,3],"expected_sha256":"<查询得到的 sha256>","dry_run":true}
+```
+
+两个修改工具均建议带 `expected_sha256`，预览与执行使用相同值；描述文件在其间被修改时会拒绝操作，需重新查询和预览。编辑只改精灵 `.yy`，保留 PNG、帧 ID 和未知字段，支持原字节撤销。重排也会改变对应图像的 `image_index`，使用固定索引的游戏代码须自行核对。
+
+`inspect_sprite.frames` 每项对应一张图像，`image_index` 为图像索引，`start` 和 `duration` 描述该图像在动画时间轴的位置。时间轴总长与图像帧数量不同：三张图像的时长为 3、1、2 时，IDE 时间轴总长显示 6；本次 Runtime 验收中 `sprite_get_number` 仍返回 3。
+
+首轮仅支持 `GMSprite v2` 普通位图：以帧为时间单位、单一帧轨道、图像帧与关键帧一一对应、连续且无重叠。暂不支持自动延伸、禁用关键帧、子轨道或修饰器；含广播消息、时刻或事件时允许配置速度与原点，但拒绝重排或调整时长。复杂结构可用 `inspect_resource` 查看原始描述。
+
+格式语义参考 GameMaker 官方[精灵编辑器](https://manual.gamemaker.io/monthly/en/The_Asset_Editors/Sprites.htm)和[关键帧结构](https://manual.gamemaker.io/lts/en/GameMaker_Language/GML_Reference/Asset_Management/Sequences/Sequence_Structs/The_Keyframe_Struct.htm)；结构检查与自动测试不替代 IDE 验收。
+
 ## 兼容与限制
 
 | 验证项 | 已观察结果 |
 | --- | --- |
-| 自动测试 | 25 项测试；Windows / Python 3.10、3.12 的 [CI 已通过](https://github.com/MKTLMORX/morx-gms2-mcp/actions/runs/38952755796) |
+| 自动测试 | 开发版提供 39 项测试；0.1.1 的 25 项测试在 Windows / Python 3.10、3.12 的 [CI 已通过](https://github.com/MKTLMORX/morx-gms2-mcp/actions/runs/38952755796)；新增编辑功能尚无公开 CI 结果 |
 | 打包 | wheel、sdist 和公开源码 ZIP 构建通过 |
 | MCP | 真实 stdio 握手、工具发现、预览、写入、错误及恢复测试通过 |
-| IDE | GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23，Windows VM 隔离场景编译运行通过 |
+| IDE | GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23：原资源创建及新增精灵编辑的 Windows VM 隔离场景编译运行通过 |
 
 <details>
 <summary>查看 IDE 验收细节</summary>
@@ -169,13 +197,15 @@ PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最
 - Steam GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23：隔离项目中脚本、物体、房间、中文分组、双帧 PNG、WAV、GLSL ES 均被识别，保存后结构校验通过，Windows VM 编译运行通过。
 - 运行画面验证双帧精灵、着色器编译状态、声音资源存在、Alarm 和 DrawGUI。声音示例是静音文件，不代表听觉验证。
 - IDE 打开期间新增脚本自动出现；其他资源类型与所有编辑冲突场景的热加载尚未逐一验证。
+- 0.2.0.dev1：IDE 正确显示蓝/绿/红重排、3/1/2 时间轴长度、6 FPS 和自定义原点 12,12；IDE 保存后的精灵数据语义保持一致，PNG 哈希未改变。
+- 新动画在 Windows VM 实际运行；每组连续采样 180 个绘制步，读取精灵内部像素。按红/绿/蓝统计，基准 1/1/1 得到 59/60/61，重排并设为 3/1/2 得到 60/30/90，小数时长 1.5/1/0.5 得到 30/61/89，按游戏帧速度 0.1 的 3/1/2 得到 60/30/90，与预期相符（最大偏差 1 个绘制步）。此结果不扩展为其他平台、复杂轨道或任意参数的完整兼容保证。
 
 </details>
 
 **当前不包含的能力：**
 
 - 不控制 IDE、不自动编译、不创建新项目；不提供资源删除/重命名、已有事件覆盖、字体/路径/时间线/序列/扩展创建、OGG/MP3 导入。
-- 暂不提供已有精灵的逐帧时长/排序/图像编辑，以及项目窗口/全屏/标题等设置接口；整体动画速度和原点目前只在新建精灵时指定。
+- 暂不提供精灵增删帧、缩放、裁剪或调色，以及项目窗口/全屏/标题等设置接口；已有精灵动画编辑仅覆盖上文限定的时间轴结构。
 - 结构校验只覆盖实现支持的关系，不是 GameMaker 官方完整格式验证器。其他 IDE 版本、平台与复杂现有项目需自行验证。
 
 ## 开发与发布
@@ -196,14 +226,16 @@ python scripts/build_release.py
 
 ## English quick start
 
-MORX GMS2 MCP is an independent local stdio server for GameMaker resource workflows. It exposes 18 tools for scripts, objects, events, rooms, PNG sprites, PCM WAV audio, GLSL ES shaders, virtual groups and transaction rollback.
+MORX GMS2 MCP is an independent local stdio server for GameMaker resource workflows. It exposes 21 tools for scripts, objects, events, rooms, PNG sprites, PCM WAV audio, GLSL ES shaders, virtual groups and transaction rollback. The current source is the unreleased 0.2.0.dev1 development version. Sprite editing passed isolated IDE save and Windows VM runtime checks on IDE 2026.0.0.16 / Runtime 2026.0.0.23, including pixel samples for fractional durations and both speed units.
 
 1. Clone this repository, create a Python 3.10+ virtual environment, and install with `python -m pip install .` inside that environment. No official PyPI release is available yet.
 2. Create and save a test project in GameMaker. Run `python -m morx_gms2_mcp bind --project <project>` and then `check --project <project>`.
 3. Generate configuration with `client-config --project <project> --client codex` or `--client claude`. Add `--write` only when resource writes are intended. Merge the result into the client configuration and reconnect.
 4. Verify the target with `server_info`. Mutation tools default to `dry_run=true`; execution requires both a writable server and explicit `dry_run=false`.
 
-Existing GML and events are not overwritten. Do not save in the IDE while the server is writing. Multi-file transactions are not fully atomic. This server does not control or compile the IDE, edit existing animation frames, or change window/fullscreen project settings. See the compatibility table above for tested versions.
+Use `inspect_sprite` before `configure_sprite` or `set_sprite_animation`. Reordering requires every existing frame ID exactly once; durations are positive animation timeline units in the resulting order, not seconds. Omitted durations stay attached to their frames. Pass the returned `sha256` as `expected_sha256` to reject stale edits. Only ordinary continuous bitmap timelines are supported; events and moments prevent retiming. PNG files are preserved. Reordering changes image indices.
+
+Existing GML and events are not overwritten. Do not save in the IDE while the server is writing. Multi-file transactions are not fully atomic. This server does not control or compile the IDE, add/remove sprite frames, edit image pixels, or change window/fullscreen project settings. See the compatibility table above for tested versions.
 
 Licensed under [MIT](LICENSE). Contributions and sanitized bug reports are welcome.
 

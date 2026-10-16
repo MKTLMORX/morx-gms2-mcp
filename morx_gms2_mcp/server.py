@@ -23,8 +23,11 @@ def build_server(project_root: Path, writable=False):
         return {'version': __version__, 'project': str(project.yyp), 'writable': project.writable,
             'transport': 'stdio', 'events': list(EVENTS) + ['Alarm (0..11)', 'User (0..15)'],
             'resources': ['script', 'object', 'room', 'PNG sprite', 'PCM WAV sound', 'GLSL ES shader'],
+            'sprite_editing': ['查询普通位图动画', '播放速度及单位', '自定义原点', '帧重排', '逐帧时长'],
+            'sprite_editing_ide_verified': True,
             'limitations': ['不执行 IDE 操作或编译', '不支持删除或重命名资源', '不覆盖已有 GML 或事件',
-                '不创建字体、路径、时间线、序列或扩展资源', '多个文件整体非操作系统级原子事务'],
+                '不创建字体、路径、时间线、序列或扩展资源', '多个文件整体非操作系统级原子事务',
+                '不增删精灵帧或编辑图像；复杂动画时间轴拒绝修改'],
             'verified_ide': '2026.0.0.16', 'verified_runtime': '2026.0.0.23'}
 
     @mcp.tool(annotations=read)
@@ -99,6 +102,30 @@ def build_server(project_root: Path, writable=False):
     def import_sound(name: str, wav_path: str, group: str = '声音', volume: float = 1.0, dry_run: bool = True) -> dict:
         """从明确给出的本地 PCM WAV 路径导入音效；验证声道、位深和数据完整性。"""
         return project.import_sound(name, wav_path, group, volume, dry_run)
+
+    @mcp.tool(annotations=read)
+    def inspect_sprite(name: str) -> dict:
+        """查询普通位图精灵的帧 ID、时间轴时长、速度、原点及描述文件 SHA-256。复杂布局拒绝解析。"""
+        return project.inspect_sprite(name)
+
+    @mcp.tool(annotations=change)
+    def configure_sprite(name: str, speed: float | None = None, speed_type: str | None = None,
+                         origin_x: int | None = None, origin_y: int | None = None,
+                         expected_sha256: str | None = None, dry_run: bool = True) -> dict:
+        """调整已有位图精灵速度与原点。null 保留；speed_type 为 frames_per_second 或 frames_per_game_frame。
+        原点为自定义像素坐标，可在图像外。建议传 inspect_sprite 的 sha256 防止使用过期预览。
+        """
+        return project.configure_sprite(name, speed, speed_type, origin_x, origin_y, expected_sha256, dry_run)
+
+    @mcp.tool(annotations=change)
+    def set_sprite_animation(name: str, frame_order: list[str] | None = None,
+                             frame_durations: list[float] | None = None,
+                             expected_sha256: str | None = None, dry_run: bool = True) -> dict:
+        """重排帧或设置时长，只支持一帧一关键帧的连续位图动画。frame_order 须完整列出查询得到的帧 ID。
+        时长为正的动画时间轴单位，按结果帧顺序提供；null 保留每帧原时长。含消息或时刻时拒绝调整。
+        不增删帧、不修改 PNG。建议传 inspect_sprite 的 sha256；不是图像拉伸。
+        """
+        return project.set_sprite_animation(name, frame_order, frame_durations, expected_sha256, dry_run)
 
     @mcp.tool(annotations=add)
     def create_shader(name: str, vertex_code: str, fragment_code: str,

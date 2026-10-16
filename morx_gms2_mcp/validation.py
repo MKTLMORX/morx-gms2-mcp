@@ -1,6 +1,7 @@
 """只读校验注册资源及已支持的引用，不扫描参考目录。"""
 from pathlib import PurePosixPath
 from .resources import KINDS, EVENT_STEMS, group_check, walk_layers
+from .animation import number
 
 
 def validate(project):
@@ -110,6 +111,10 @@ def validate(project):
                     if data.get('parentRoom'):
                         warnings.append('继承房间仅进行基础引用检查：' + path)
                 elif kind == 'GMSprite':
+                    sequence = data.get('sequence', {})
+                    if sequence and data.get('type') == 0:
+                        number(sequence['playbackSpeed'], '动画速度')
+                        number(sequence['length'], '动画总长度')
                     frames = {f['name'] for f in data['frames']}
                     if len(frames) != len(data['frames']):
                         errors.append('精灵帧编号重复：' + path)
@@ -120,6 +125,12 @@ def validate(project):
                     for track in data.get('sequence', {}).get('tracks', []):
                         if track.get('resourceType') == 'GMSpriteFramesTrack':
                             for key in track['keyframes']['Keyframes']:
+                                number(key['Key'], '关键帧起点')
+                                number(key['Length'], '逐帧时长', positive=not key.get('Stretch'))
+                                if key['Key'] >= sequence['length']:
+                                    errors.append('关键帧起点超出动画总长度：' + path)
+                                if not key.get('Stretch') and key['Key'] + key['Length'] > sequence['length'] + 1e-9:
+                                    errors.append('关键帧末端超出动画总长度：' + path)
                                 for channel in key['Channels'].values():
                                     if channel['Id']['name'] not in frames or channel['Id']['path'] != path:
                                         errors.append('精灵动画帧引用错误：' + path)

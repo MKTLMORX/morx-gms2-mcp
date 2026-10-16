@@ -8,6 +8,7 @@ from pathlib import Path
 from PIL import Image
 from . import schemas
 from .storage import Storage, digest, encode, parse_yy
+from .animation import number, timeline, retime
 
 KINDS = {'scripts': 'GMScript', 'objects': 'GMObject', 'rooms': 'GMRoom',
          'sprites': 'GMSprite', 'sounds': 'GMSound', 'shaders': 'GMShader'}
@@ -306,6 +307,76 @@ class Project(Storage):
             for frame, raw in zip(frames, images):
                 edit.new(f'sprites/{name}/{frame}.png', raw)
                 edit.new(f'sprites/{name}/layers/{frame}/{layer}.png', raw)
+            return edit.commit(dry_run)
+
+    def _sprite_animation(self, edit, name, expected_sha256=None):
+        ref, data = self._ref(edit, name, 'sprites')
+        if expected_sha256 is not None:
+            if not isinstance(expected_sha256, str) or not re.fullmatch('[a-f0-9]{64}', expected_sha256):
+                raise ValueError('expected_sha256 必须是 inspect_sprite 返回的 SHA-256')
+            if digest(edit.raw(ref['path'])) != expected_sha256:
+                raise ValueError('精灵描述已被修改，请重新 inspect_sprite 并预览')
+        sequence, track, keys, frames = timeline(data, ref['path'])
+        base = ref['path'].rsplit('/', 1)[0]
+        for frame in frames:
+            paths = [f'{base}/{frame}.png'] + [
+                f"{base}/layers/{frame}/{layer['name']}.png" for layer in data['layers']]
+            if any(not self.path(path).is_file() for path in paths):
+                raise ValueError('精灵缺少帧图像，请先修复资源：' + frame)
+        return ref, data, sequence, track, keys, frames
+
+    def inspect_sprite(self, name):
+        with self.lock:
+            edit = Edit(self)
+            ref, data, sequence, track, keys, frames = self._sprite_animation(edit, name)
+            image_indices = {frame['name']: index for index, frame in enumerate(data['frames'])}
+            return {'name': name, 'path': ref['path'], 'sha256': digest(edit.raw(ref['path'])),
+                'width': data['width'], 'height': data['height'],
+                'origin': {'mode': data['origin'], 'x': sequence['xorigin'], 'y': sequence['yorigin']},
+                'speed': sequence['playbackSpeed'],
+                'speed_type': ('frames_per_second', 'frames_per_game_frame')[sequence['playbackSpeedType']],
+                'duration_unit': 'animation_frames', 'length': sequence['length'],
+                'frames': [{'frame_id': key['Channels']['0']['Id']['name'], 'keyframe_id': key['id'],
+                    'image_index': image_indices[key['Channels']['0']['Id']['name']],
+                    'start': key['Key'], 'duration': key['Length']} for key in keys]}
+
+    def configure_sprite(self, name, speed=None, speed_type=None, origin_x=None, origin_y=None,
+                         expected_sha256=None, dry_run=True):
+        if speed is not None:
+            number(speed, '动画速度')
+        speed_types = {'frames_per_second': 0, 'frames_per_game_frame': 1}
+        if speed_type is not None and (not isinstance(speed_type, str) or speed_type not in speed_types):
+            raise ValueError('speed_type 必须为 frames_per_second 或 frames_per_game_frame')
+        for value in (origin_x, origin_y):
+            if value is not None and (type(value) is not int or not -(2**31) <= value < 2**31):
+                raise ValueError('原点坐标必须为 32 位整数，允许位于图像外')
+        with self.lock:
+            edit = Edit(self)
+            ref, data, sequence, track, keys, frames = self._sprite_animation(edit, name, expected_sha256)
+            original = encode(data)
+            if speed is not None:
+                sequence['playbackSpeed'] = float(speed)
+            if speed_type is not None:
+                sequence['playbackSpeedType'] = speed_types[speed_type]
+            for field, value in (('xorigin', origin_x), ('yorigin', origin_y)):
+                if value is not None:
+                    sequence[field] = value
+                    data['origin'] = 9  # 自定义原点；不修改另一坐标或碰撞框。
+            if encode(data) != original:
+                edit.save(ref['path'], data)
+            return edit.commit(dry_run)
+
+    def set_sprite_animation(self, name, frame_order=None, frame_durations=None,
+                             expected_sha256=None, dry_run=True):
+        with self.lock:
+            edit = Edit(self)
+            ref, data, sequence, track, keys, frames = self._sprite_animation(edit, name, expected_sha256)
+            original = encode(data)
+            if frame_order is not None or frame_durations is not None:
+                order = retime(sequence, track, keys, frame_order, frame_durations)
+                data['frames'] = [frames[frame] for frame in order]
+            if encode(data) != original:
+                edit.save(ref['path'], data)
             return edit.commit(dry_run)
 
     def import_sound(self, name, wav_path, group='声音', volume=1.0, dry_run=False):

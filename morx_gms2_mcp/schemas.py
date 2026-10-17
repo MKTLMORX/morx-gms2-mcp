@@ -13,6 +13,13 @@ def instance_layer(name, depth=0):
         inheritVisibility=True, instances=[], layers=[], properties=[], userdefinedDepth=False, visible=True)
 
 
+def instance(name, object_ref, x=0, y=0):
+    return typed('GMRInstance', 'v4', **{'%Name': name}, name=name,
+        colour=4294967295, frozen=False, hasCreationCode=False, ignore=False, imageIndex=0, imageSpeed=1.0,
+        inheritCode=False, inheritedItemId=None, inheritItemSettings=False, isDnd=False,
+        objectId=object_ref, properties=[], rotation=0.0, scaleX=1.0, scaleY=1.0, x=x, y=y)
+
+
 def room(name, width, height):
     view = dict(hborder=32, hport=height, hspeed=-1, hview=height, inherit=False, objectId=None,
         vborder=32, visible=False, vspeed=-1, wport=width, wview=width, xport=0, xview=0, yport=0, yview=0)

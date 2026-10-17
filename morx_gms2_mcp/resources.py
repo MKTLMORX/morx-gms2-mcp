@@ -26,6 +26,19 @@ EVENT_STEMS = {0: 'Create', 1: 'Destroy', 2: 'Alarm', 3: 'Step', 4: 'Collision',
                6: 'Mouse', 7: 'Other', 8: 'Draw', 9: 'KeyPress', 10: 'KeyRelease', 12: 'CleanUp', 13: 'Gesture'}
 
 
+def event_spec(event, number):
+    """事件名与编号统一映射；创建与读写共用，避免类型判断漂移。"""
+    if type(number) is not int:
+        raise ValueError('事件编号必须为整数')
+    if event == 'Alarm' and 0 <= number < 12:
+        return 2, number, 'Alarm'
+    if event == 'User' and 0 <= number < 16:
+        return 7, number + 10, 'Other'
+    if event in EVENTS and number == 0:
+        return EVENTS[event]
+    raise ValueError('不支持的事件或编号；Alarm 为 0～11，User 为 0～15')
+
+
 def name_check(name):
     if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}', name):
         raise ValueError('资源名必须是 1～64 位英文标识符')
@@ -97,6 +110,248 @@ class Edit:
 class Project(Storage):
     def metadata(self):
         return self.read(self.yyp.name)
+
+    def _code_path(self, edit, name, event, number):
+        ref, data = self._ref(edit, name)
+        if data['resourceType'] == 'GMScript' and event is None and number == 0:
+            if data.get('isDnD'):
+                raise ValueError('不修改 GML Visual 脚本')
+            return f'scripts/{name}/{name}.gml'
+        if data['resourceType'] != 'GMObject' or event is None:
+            raise ValueError('须指定脚本，或物体及其已有事件')
+        typ, num, stem = event_spec(event, number)
+        events = [e for e in data['eventList'] if e['eventType'] == typ and e['eventNum'] == num]
+        if len(events) != 1 or events[0].get('isDnD'):
+            raise ValueError('事件不存在、不唯一或属于 GML Visual')
+        return f'objects/{name}/{stem}_{num}.gml'
+
+    def read_code(self, name, event=None, number=0):
+        with self.lock:
+            edit = Edit(self)
+            path = self._code_path(edit, name, event, number)
+            raw = edit.raw(path)
+            if raw is None or len(raw) > 2 * 1024 * 1024:
+                raise ValueError('代码文件不存在或超过 2 MiB')
+            return {'name': name, 'event': event, 'number': number, 'path': path,
+                    'sha256': digest(raw), 'code': raw.decode('utf-8-sig')}
+
+    def update_code(self, name, code, expected_sha256, event=None, number=0, dry_run=True):
+        if not isinstance(code, str) or '\0' in code or len(code.encode('utf-8')) > 2 * 1024 * 1024:
+            raise ValueError('GML 须为不含 NUL、最多 2 MiB 的 UTF-8 文本')
+        if not isinstance(expected_sha256, str) or not re.fullmatch('[a-f0-9]{64}', expected_sha256):
+            raise ValueError('必须传 read_code 返回的 expected_sha256')
+        from .runtime_bridge import OBJECT
+        if name == OBJECT:
+            raise ValueError('不通过代码编辑工具修改受管理的测试桥接')
+        with self.lock:
+            edit = Edit(self)
+            path = self._code_path(edit, name, event, number)
+            raw = edit.raw(path)
+            if raw is None or digest(raw) != expected_sha256:
+                raise ValueError('代码已被修改或不存在，请重新 read_code 并预览')
+            normalized = code.replace('\r\n', '\n').replace('\r', '\n')
+            if b'\r\n' in raw:
+                normalized = normalized.replace('\n', '\r\n')
+            edit.changes[path] = (b'\xef\xbb\xbf' if raw.startswith(b'\xef\xbb\xbf') else b'') + normalized.encode('utf-8')
+            result = edit.commit(dry_run)
+            result['compiled'] = False
+            return result
+
+    def _bridge_object(self, edit):
+        """读取受管理桥接；任何未受管理的同名物体都给出明确错误。"""
+        from .runtime_bridge import OBJECT, bridge_key, sources
+        ref, obj = self._ref(edit, OBJECT, 'objects')
+        create = edit.raw(f'objects/{OBJECT}/Create_0.gml')
+        if create is None:
+            raise ValueError('sys_morx_runtime 已被普通物体占用或桥接代码缺失；请删除该物体后重试')
+        try:
+            key = bridge_key(create.decode('utf-8-sig'))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValueError('sys_morx_runtime 已被普通物体占用，未发现受管理的桥接标记；请删除该物体后重试') from exc
+        expected = sources(key)
+        files = {}
+        for event, code in expected.items():
+            _, number, stem = EVENTS[event]
+            path = f'objects/{OBJECT}/{stem}_{number}.gml'
+            raw = edit.raw(path)
+            try:
+                text = None if raw is None else raw.decode('utf-8-sig').replace('\r\n', '\n')
+            except UnicodeDecodeError:
+                text = None
+            files[path] = (text, raw)
+        return ref, obj, key, expected, files
+
+    @staticmethod
+    def _bridge_text(original, code):
+        """写回桥接代码时保留已有 BOM/CRLF 风格。"""
+        raw = code.encode('utf-8')
+        if original:
+            if b'\r\n' in original:
+                raw = raw.replace(b'\n', b'\r\n')
+            if original.startswith(b'\xef\xbb\xbf'):
+                raw = b'\xef\xbb\xbf' + raw
+        return raw
+
+    def _bridge_rooms(self, edit):
+        """返回启动房间及所有房间的桥接图层/实例状态。"""
+        from .runtime_bridge import LAYER
+        meta = edit.load(self.yyp.name)
+        order = meta.get('RoomOrderNodes', [])
+        if not order:
+            raise ValueError('项目必须已有启动房间')
+        start = order[0]['roomId']['name']
+        states = []
+        for node in order:
+            name = node['roomId']['name']
+            ref, room = self._ref(edit, name, 'rooms')
+            top = [layer for layer in room.get('layers', []) if layer.get('name') == LAYER]
+            nested = [layer for layer in walk_layers(room.get('layers', []))
+                      if layer.get('name') == LAYER and layer not in top]
+            stray = [instance for layer in walk_layers(room.get('layers', []))
+                     for instance in layer.get('instances', [])
+                     if instance.get('name') == 'inst_morx_runtime' and layer not in top]
+            states.append({'name': name, 'ref': ref, 'room': room,
+                           'top': top, 'nested': nested, 'stray': stray})
+        return start, states
+
+    @staticmethod
+    def _room_editable(room):
+        return room.get('$GMRoom') == 'v1' and not room.get('parentRoom') and not room.get('inheritLayers')
+
+    def _bridge_room_ok(self, edit, bridge_ref):
+        from .runtime_bridge import OBJECT
+        start, states = self._bridge_rooms(edit)
+        start_state = next((state for state in states if state['name'] == start), None)
+        if start_state is None or not self._room_editable(start_state['room']):
+            return False
+        start_ok = False
+        for state in states:
+            if state['nested'] or state['stray']:
+                return False
+            if state['top']:
+                if state['name'] != start or len(state['top']) != 1:
+                    return False
+                instances = state['top'][0].get('instances', [])
+                if len(instances) != 1:
+                    return False
+                instance = instances[0]
+                obj = instance.get('objectId') or {}
+                if (instance.get('name') != 'inst_morx_runtime'
+                        or obj.get('name') != OBJECT or obj.get('path') != bridge_ref['path']):
+                    return False
+                start_ok = True
+        return start_ok
+
+    def _sync_bridge_room(self, edit, bridge_ref):
+        """把桥接实例收敛到当前启动房间，并从其他房间移除旧实例。"""
+        from .runtime_bridge import LAYER
+        start, states = self._bridge_rooms(edit)
+        start_state = next((state for state in states if state['name'] == start), None)
+        if start_state is None or not self._room_editable(start_state['room']):
+            raise ValueError('桥接安装需要非继承的 GMRoom v1 启动房间')
+        if self._bridge_room_ok(edit, bridge_ref):
+            return start, False
+        for state in states:
+            if state['nested'] or state['stray']:
+                raise ValueError('房间中存在无法自动修复的桥接图层或实例，请手动清理：' + state['name'])
+            if state['top'] and not self._room_editable(state['room']):
+                raise ValueError('房间包含继承设置，无法自动移除桥接图层：' + state['name'])
+        for state in states:
+            if not state['top']:
+                continue
+            removed = [instance.get('name') for layer in state['top'] for instance in layer.get('instances', [])]
+            room = state['room']
+            room['layers'] = [layer for layer in room.get('layers', []) if layer.get('name') != LAYER]
+            room['instanceCreationOrder'] = [item for item in room.get('instanceCreationOrder', [])
+                                             if item.get('name') not in removed]
+            edit.save(state['ref']['path'], room)
+        for state in states:
+            if state['name'] != start:
+                continue
+            room = state['room']
+            layer = schemas.instance_layer(LAYER, -1000000000)
+            layer['instances'].append(schemas.instance('inst_morx_runtime', bridge_ref))
+            room.setdefault('layers', []).append(layer)
+            room.setdefault('instanceCreationOrder', []).append(
+                {'name': 'inst_morx_runtime', 'path': state['ref']['path']})
+            edit.save(state['ref']['path'], room)
+            break
+        return start, True
+
+    def bridge_key(self):
+        """校验受管理桥接并返回标识；运行前用它确认启动房间实例存在。"""
+        from .runtime_bridge import OBJECT
+        with self.lock:
+            edit = Edit(self)
+            ref, obj, key, expected, files = self._bridge_object(edit)
+            if obj.get('persistent') is not True:
+                raise ValueError('测试桥接物体不是常驻物体，请重新 install_runtime_bridge 修复')
+            events = {(event['eventType'], event['eventNum']): event for event in obj['eventList']}
+            for event, code in expected.items():
+                typ, number, stem = EVENTS[event]
+                text, _ = files[f'objects/{OBJECT}/{stem}_{number}.gml']
+                found = events.get((typ, number))
+                if found is None or found.get('isDnD'):
+                    raise ValueError('测试桥接事件缺失或为 GML Visual，请重新 install_runtime_bridge 修复')
+                if text != code:
+                    raise ValueError('测试桥接代码与此服务版本不一致，请重新 install_runtime_bridge 修复')
+            if not self._bridge_room_ok(edit, ref):
+                raise ValueError('当前启动房间缺少受管理的测试桥接实例，请重新 install_runtime_bridge 修复')
+            return key
+
+    def install_runtime_bridge(self, dry_run=True):
+        from uuid import uuid4
+        from .runtime_bridge import OBJECT, sources
+        with self.lock:
+            edit = Edit(self)
+            meta = edit.load(self.yyp.name)
+            if any(r['id']['name'] == OBJECT for r in meta['resources']):
+                ref, obj, key, expected, files = self._bridge_object(edit)
+                repaired = False
+                if obj.get('persistent') is not True:
+                    obj['persistent'] = True
+                    repaired = True
+                events = {(event['eventType'], event['eventNum']): event for event in obj['eventList']}
+                for event, code in expected.items():
+                    typ, number, stem = EVENTS[event]
+                    path = f'objects/{OBJECT}/{stem}_{number}.gml'
+                    text, raw = files[path]
+                    existing = events.get((typ, number))
+                    if existing is not None and existing.get('isDnD'):
+                        raise ValueError('测试桥接事件为 GML Visual，无法自动修复；请删除该物体后重试')
+                    if existing is None:
+                        obj['eventList'].append(schemas.typed('GMEvent', 'v1', **{'%Name': ''}, name='',
+                            collisionObjectId=None, eventNum=number, eventType=typ, isDnD=False))
+                        repaired = True
+                    if text != code:
+                        data = self._bridge_text(raw, code)
+                        if raw is None:
+                            edit.new(path, data)
+                        else:
+                            edit.changes[path] = data
+                        repaired = True
+                if repaired:
+                    edit.save(ref['path'], obj)
+                room, moved = self._sync_bridge_room(edit, ref)
+                result = edit.commit(dry_run)
+                return {**result, 'bridge': OBJECT, 'room': room,
+                        'already_installed': True, 'repaired': repaired or moved}
+            start, states = self._bridge_rooms(edit)
+            if any(state['top'] or state['nested'] or state['stray'] for state in states):
+                raise ValueError('房间已有同名桥接图层或实例，但桥接物体不存在；请手动清理')
+            key = uuid4().hex
+            obj = schemas.object_resource(OBJECT)
+            obj['persistent'] = True
+            for event, code in sources(key).items():
+                typ, number, stem = EVENTS[event]
+                obj['eventList'].append(schemas.typed('GMEvent', 'v1', **{'%Name': ''}, name='',
+                    collisionObjectId=None, eventNum=number, eventType=typ, isDnD=False))
+                edit.new(f'objects/{OBJECT}/{stem}_{number}.gml', code.encode('utf-8'))
+            path = self._register(edit, 'objects', OBJECT, obj, '物体/system')
+            bridge_ref = {'name': OBJECT, 'path': path}
+            room, _ = self._sync_bridge_room(edit, bridge_ref)
+            return {**edit.commit(dry_run), 'bridge': OBJECT, 'room': room,
+                    'already_installed': False, 'repaired': False}
 
     def inspect_display_settings(self, room_name=None):
         with self.lock:
@@ -290,14 +545,7 @@ class Project(Storage):
             return edit.commit(dry_run)
 
     def add_event(self, name, event, code, number=0, dry_run=False):
-        if event == 'Alarm' and number in range(12):
-            typ, num, stem = 2, number, 'Alarm'
-        elif event == 'User' and number in range(16):
-            typ, num, stem = 7, number + 10, 'Other'
-        elif event in EVENTS and number == 0:
-            typ, num, stem = EVENTS[event]
-        else:
-            raise ValueError('不支持的事件或编号；Alarm 为 0～11，User 为 0～15')
+        typ, num, stem = event_spec(event, number)
         with self.lock:
             edit = Edit(self)
             ref, obj = self._ref(edit, name, 'objects')
@@ -373,10 +621,7 @@ class Project(Storage):
                 raise ValueError('必须指定唯一实例图层')
             if any(i['name'].casefold() == instance.casefold() for l in all_layers for i in l.get('instances', [])):
                 raise ValueError('同名实例已存在')
-            layers[0]['instances'].append(schemas.typed('GMRInstance', 'v4', **{'%Name': instance}, name=instance,
-                colour=4294967295, frozen=False, hasCreationCode=False, ignore=False, imageIndex=0, imageSpeed=1.0,
-                inheritCode=False, inheritedItemId=None, inheritItemSettings=False, isDnd=False, objectId=obj_ref,
-                properties=[], rotation=0.0, scaleX=1.0, scaleY=1.0, x=x, y=y))
+            layers[0]['instances'].append(schemas.instance(instance, obj_ref, x, y))
             data['instanceCreationOrder'].append({'name': instance, 'path': ref['path']})
             edit.save(ref['path'], data)
             return edit.commit(dry_run)

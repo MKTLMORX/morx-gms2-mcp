@@ -37,7 +37,7 @@ class ProtocolTests(ProjectFixture):
                     init = await session.initialize()
                     self.assertEqual(init.serverInfo.name, 'morx-gms2-mcp')
                     tools = (await session.list_tools()).tools
-                    self.assertEqual(len(tools), 24)
+                    self.assertEqual(len(tools), 35)
                     self.assertTrue({'inspect_sprite', 'configure_sprite', 'set_sprite_animation'}
                                     .issubset({tool.name for tool in tools}))
                     for tool in tools:
@@ -49,11 +49,19 @@ class ProtocolTests(ProjectFixture):
                         self.assertEqual(bool(result.isError), error, str(result))
                         return json.loads(result.content[0].text) if not error else None
                     self.assertEqual((await call('server_info', {}))['writable'], writable)
+                    self.assertFalse((await call('runtime_status', {}))['enabled'])
+                    await call('run_game', {}, True)
                     preview = await call('create_script', {'name': 'scr_protocol', 'code': '// 测试'})
                     self.assertTrue(preview['dry_run'])
                     self.assertFalse((self.root / 'scripts').exists())
                     if writable:
                         result = await call('create_script', {'name': 'scr_protocol', 'code': '// 测试', 'dry_run': False})
+                        code = await call('read_code', {'name': 'scr_protocol'})
+                        edit = {'name': 'scr_protocol', 'code': '// 修改', 'expected_sha256': code['sha256']}
+                        self.assertTrue((await call('update_code', edit))['dry_run'])
+                        changed = await call('update_code', {**edit, 'dry_run': False})
+                        await call('update_code', {**edit, 'dry_run': False}, True)
+                        await call('restore_backup', {'transaction_id': changed['transaction'], 'dry_run': False})
                         await call('create_script', {'name': 'scr_protocol', 'dry_run': False}, True)
                         await call('restore_backup', {'transaction_id': result['transaction'], 'dry_run': False})
                         self.assertFalse((self.root / 'scripts').exists())

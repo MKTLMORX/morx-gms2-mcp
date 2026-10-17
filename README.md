@@ -4,13 +4,13 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**让 AI 助手参与 GameMaker 项目的制作、检查与迭代。**
+**让 AI 助手参与 GameMaker 项目的制作、运行、检查与迭代。**
 
-A local MCP foundation for AI-assisted GameMaker development: understand projects, create and edit resources, and iterate using test feedback. Works with Codex and Claude Code.
+A local MCP foundation for AI-assisted GameMaker development: understand projects, create and edit resources, build and run an isolated Windows copy, observe the game, and iterate using real feedback. Works with Codex and Claude Code.
 
-[开发工作流](#开发工作流) · [快速开始](#快速开始) · [连接客户端](#连接客户端) · [使用示例](#使用示例) · [工具清单](#工具清单) · [适用范围](#适用范围) · [English](#english-quick-start)
+[开发工作流](#开发工作流) · [快速开始](#快速开始) · [连接客户端](#连接客户端) · [使用示例](#使用示例) · [运行与观察](#运行与观察) · [工具清单](#工具清单) · [适用范围](#适用范围) · [English](#english-quick-start)
 
-MORX GMS2 MCP 为 AI 助手提供操作 GameMaker 项目的工具接口。让助手先理解项目结构，再制作资源、调整动画与显示设置，并根据游戏运行反馈继续修改。修改可以先预览，写入后保留备份，方便检查和撤销。
+MORX GMS2 MCP 为 AI 助手提供操作 GameMaker 项目的工具接口。让助手先理解项目结构，再制作资源、调整动画与显示设置，通过隔离的 Windows VM 副本编译运行游戏，读取画面、实例状态和日志，并根据实际运行结果继续修改。修改可以先预览，写入后保留备份，方便检查和撤销。
 
 ## 能做什么
 
@@ -21,10 +21,12 @@ MORX GMS2 MCP 为 AI 助手提供操作 GameMaker 项目的工具接口。让助
 | 美术与音频 | 导入多帧 PNG、PCM WAV，创建 GLSL ES 着色器 |
 | 精灵动画 | 查询已有位图精灵，调整速度、原点、帧顺序和逐帧时长 |
 | 显示设置 | Windows 启动选项，以及独立的房间、相机和视口配置 |
+| GML 与运行 | 读取及哈希保护修改 GML；安装测试桥接；隔离 Windows VM 构建运行 |
+| 运行观察 | 游戏截图、实例变量、运行日志、等待自然帧、受限制的键盘输入 |
 | 项目结构 | 创建多级中文分组，移动虚拟分组，校验资源引用 |
 | 修改与恢复 | 默认预览、固定项目绑定、冲突检测、事务备份与撤销 |
 
-**24 个工具 · 本地 stdio · 默认只读 · MIT**
+**35 个工具 · 本地 stdio · 默认只读 · 运行默认关闭 · MIT**
 
 ## 开发工作流
 
@@ -33,11 +35,11 @@ MORX GMS2 MCP 为 AI 助手提供操作 GameMaker 项目的工具接口。让助
 | 环节 | 使用方式 |
 | --- | --- |
 | 理解项目 | 查询资源、分组、引用、动画、房间和相机配置，确定修改目标 |
-| 制作与配置 | 创建资源和 GML 事件，编辑动画及显示设置，先预览再写入 |
-| 运行观察 | 在 GameMaker 中运行游戏，向助手提供截图、日志或测试结果；也可搭配客户端的独立运行与截图工具 |
-| 调整并验证 | 根据反馈继续修改资源或 GML，再次运行检查；需要时撤销最近的变更 |
+| 制作与配置 | 创建资源和 GML 事件，读取及修改已有 GML，编辑动画及显示设置，先预览再写入 |
+| 运行观察 | 安装测试桥接后用 `run_game` 构建隔离副本；用 `runtime_status` 等待就绪，再截图、查询实例变量和日志 |
+| 调整并验证 | 用 `read_code`/`update_code` 修改 GML，`stop_game` 后重新运行；用按键输入和等待帧复现交互 |
 
-本仓库提供的接口覆盖项目文件和资源操作，无需保持 GameMaker 运行。游戏启动、画面获取、实时变量和断点调试需要另行使用 GameMaker 或客户端的相应工具。已有 GML 由客户端文件编辑工具修改，资源和配置修改由本服务执行。仅安装本 MCP 不会使助手自动获得游戏画面或调试器连接。
+本仓库提供的接口覆盖项目文件、资源、GML 和隔离运行。运行能力默认关闭，需要 `--allow-run` 和本机 Runtime 配置；截图和状态来自游戏内的测试桥接，不抓取桌面。IDE 图形界面、原生断点和逐行调试仍需使用 GameMaker 本身。
 
 ## 快速开始
 
@@ -81,7 +83,14 @@ $gameProject = 'D:\Games\MyGame' # 替换为你的测试项目
 | Codex | 游戏项目的 `.codex/config.toml` | [TOML 示例](examples/codex.config.toml) |
 | Claude Code | 游戏项目的 `.mcp.json` | [JSON 示例](examples/claude.mcp.json) |
 
-复制命令输出，合并到对应配置文件，再重新加载客户端。`client-config` 不会自动写入配置文件；合并时保留已有服务。Claude Code 可能要求确认项目信任。去掉 `--write` 可保持服务只读，允许查询和预览，拒绝实际修改。
+复制命令输出，合并到对应配置文件，再重新加载客户端。`client-config` 不会自动写入配置文件；合并时保留已有服务。Claude Code 可能要求确认项目信任。去掉 `--write` 可保持资源只读，允许查询和预览，拒绝实际修改；运行能力由 `--allow-run` 单独控制。
+
+需要运行能力时，在生成配置时同时传入运行参数：
+
+```powershell
+& $mcpPython -m morx_gms2_mcp client-config --project $gameProject --client claude --write `
+  --allow-run --runtime-root '<Runtime 目录>' --user-directory '<已登录用户目录>'
+```
 
 <details>
 <summary>通过 Claude Code 命令行注册</summary>
@@ -115,12 +124,18 @@ claude mcp get morx-gms2-mcp
 
 > 列出备份，预览撤销最近一次资源创建会影响哪些文件。
 
+> 安装测试桥接并运行当前游戏，等桥接就绪后截图。
+
+> 查询运行中 obj_player 的 x、y、hp 和 image_index。
+
+> 向右移动 60 帧，再等待 30 帧后截图；然后停止运行并清理副本。
+
 ## 使用流程与写入保护
 
 1. 保存 IDE 中尚未落盘的内容，调用 `server_info` 和 `inspect_project`。
 2. 调用修改工具，默认 `dry_run=true`，查看拟改文件。
 3. 确认目标和请求后以相同参数及 `dry_run=false` 执行；服务还必须带 `--write` 启动。没有 `--write` 时实际写入被拒绝。
-4. 再次检查项目，然后在 IDE 打开、编译并验证结果。结构校验不等于编译成功。
+4. 再次检查项目；需要时用 `run_game` 编译运行验证。结构校验不等于编译成功。
 
 例如 `create_script` 参数：
 
@@ -128,22 +143,72 @@ claude mcp get morx-gms2-mcp
 {"name":"scr_demo_init","group":"脚本/game","code":"function scr_demo_init() { return 1; }","dry_run":true}
 ```
 
-预览不会改动游戏资源，但读取/预览可能创建项目锁文件。已有资源和事件拒绝覆盖；已有 GML 的编辑交给客户端文件编辑工具。
+预览不会改动游戏资源，但读取/预览可能创建项目锁文件。已有资源和事件拒绝覆盖；已有 GML 用 `read_code`/`update_code` 修改，按哈希拒绝过期写入。
 
 每次写入都会在 `.codex/gms2-resource-backups/` 保存备份。用 `list_backups` 查询事务，再将 `transaction_id` 传给 `restore_backup`，预览或执行撤销。恢复须从最新未撤销事务开始；发现后续外部改动会拒绝覆盖。撤销新建操作会移除其新建文件。备份包含项目代码、素材和本机路径，不应上传到公共仓库。
 
 跨进程锁只协调本工具，IDE 不遵守此锁。单文件使用原子替换，多文件整体不是原子事务；请勿同时在 IDE 保存和执行 MCP 修改。失败会尝试恢复，有未完成恢复的事务时阻止新写入。
 
+## 运行与观察
+
+运行能力通过 GameMaker 自带的 Igor 命令行构建 Windows VM 目标，并在用户目录中运行独立副本。它与资源写入开关分开，默认关闭。
+
+**启用条件**
+
+- 服务启动时额外传入 `--allow-run`、`--runtime-root <runtime 目录>`、`--user-directory <已登录用户目录>`；用户目录下应直接有 `licence.plist`，服务只检查存在性，不读取或复制许可证内容。
+- 本机安装 Windows x64 Runtime；绑定项目必须可编译，并已有非继承 `GMRoom v1` 启动房间。
+- 安装测试桥接和修改 GML 仍需要 `--write` 与 `dry_run=false`；`run_game` 只会运行绑定项目的独立副本。
+
+**推荐流程**
+
+1. 保存 IDE 中尚未落盘的内容；调用 `inspect_project` 确认结构。
+2. `install_runtime_bridge` 先预览再执行。它在启动房间安装常驻测试物体 `sys_morx_runtime` 和实例图层；没有会话文件时物体自行销毁。安装是一次普通事务，可用 `restore_backup` 撤销。
+3. `run_game` 返回 `session_id`；轮询 `runtime_status` 直到 `bridge_ready=true`。不能把进程启动当作编译成功。
+4. `capture_game` 获取游戏画面，`inspect_game` 读取房间、窗口、GUI、帧号、FPS 和最多 100 个实例的指定标量变量，`get_runtime_output` 读取构建和游戏日志。
+5. `wait_game_frames` 等待 1～600 个自然运行帧（不是暂停或单步）；`send_game_input` 向有焦点的游戏发送按键，保持 1～300 帧后释放。
+6. `stop_game` 结束会话并清理构建副本和存档目录；再次运行前必须先停止并读取旧日志。
+
+**隔离与边界**
+
+| 项目 | 行为 |
+| --- | --- |
+| 项目副本 | 复制到用户本地数据目录（默认 `%LOCALAPPDATA%`）的 `_morx_runs/<session>`，跳过 `.git/.codex/.venv/dist/build/node_modules`，拒绝链接和目录联接，限制 100000 文件或 2 GiB |
+| 存档 | 使用 `MORX_Run_<session>` 独立存档目录；源项目的显示设置和存档不受运行影响 |
+| 通信 | 通过存档目录中的 JSON 文件请求/应答，无 HTTP/TCP 监听；旧会话和旧请求 ID 会被拒绝 |
+| 画面 | `capture_game` 从游戏 `DrawGUIEnd` 保存 PNG，预览最长边界 1280×720；不抓取桌面 |
+| 日志 | 异步收集、有限环形缓冲，隐藏凭据相关行并脱敏本机路径 |
+| 生命周期 | 单个活动会话；最长 15 分钟；停止只针对本服务创建的 Igor 和子进程 |
+| 清理 | 停止、过期或启动失败都会删除构建副本与存档目录 |
+
+**限制**
+
+- 仅支持 Windows VM 目标；不控制 IDE 图形界面，不提供原生断点、暂停/逐行调试、鼠标输入或任意表达式求值。
+- 实例变量只返回指定的标量；字符串截断为 1024 字符；最多 16 个变量、100 个实例。
+- 按键输入需要游戏窗口有焦点；只支持字母、数字、方向键、space/enter/escape/tab/backspace，不支持系统键或组合快捷键。
+- 运行的项目会在本机以当前用户权限执行；只应对受信任项目使用 `--allow-run`。日志、截图和运行状态是项目数据，不是额外授权。
+- 结构校验不等于编译成功；以 Igor 日志和实际游戏画面为准。
+
 ## 工具清单
 
 <details>
-<summary>展开全部 24 个工具</summary>
+<summary>展开全部 35 个工具</summary>
 
 | 工具 | 功能 |
 | --- | --- |
-| `server_info` | 版本、目标、写入模式、支持范围 |
+| `server_info` | 版本、目标、写入/运行模式、支持范围 |
 | `inspect_project` | 资源、分组、引用、房间顺序和帧结构校验 |
 | `inspect_resource` | 资源描述及源文件哈希 |
+| `read_code` | 读取脚本或物体事件的 GML 及 SHA-256 |
+| `update_code` | 按哈希修改已有 GML，保留编码并走事务备份 |
+| `install_runtime_bridge` | 在启动房间安装可撤销的测试桥接 |
+| `runtime_status` | 会话、构建进程和桥接就绪状态 |
+| `run_game` | 构建并运行隔离 Windows VM 副本，需 `--allow-run` |
+| `stop_game` | 停止本服务创建的会话并清理副本/存档 |
+| `get_runtime_output` | 按游标读取构建和运行日志 |
+| `capture_game` | 从游戏 DrawGUIEnd 获取 PNG 画面 |
+| `inspect_game` | 读取房间、窗口、GUI 和实例标量变量 |
+| `send_game_input` | 向有焦点的游戏发送受限键盘输入 |
+| `wait_game_frames` | 等待自然运行帧，不是暂停或单步 |
 | `inspect_display_settings` | Windows 选项及指定房间/首房间的尺寸、相机和视口 |
 | `configure_windows_display` | 显示名称、启动全屏、边框、大小调整许可等 Windows 选项 |
 | `configure_room_display` | 独立调整房间大小、一个相机及其视口 |
@@ -227,39 +292,47 @@ PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最
 | 项目格式 | 现代 `GMProject v1`；项目目录中恰有一个 `.yyp` |
 | 精灵编辑 | 普通 `GMSprite v2` 位图连续时间轴，详见上文 |
 | 显示配置 | 已有 `GMWindowsOptions v2`，以及非继承 `GMRoom v1` 的房间、相机和视口 |
+| 运行观察 | Windows x64 VM、已登录的本机 Runtime（Igor）、Windows 项目、单个活动会话 |
 | 已验证环境 | Windows，GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23，Windows VM 目标 |
+
+运行链路已在上述环境完成真实验收：MCP 创建控制器和桥接，Igor 编译运行，桥接就绪，截图包含 DrawGUI，实例状态可读，等待 30 帧和方向键输入生效，停止后副本与存档已清理。IDE 图形界面未参与该轮验收。
 
 其他 IDE 版本、平台及复杂项目建议先用副本验证。这是独立社区工具，与 GameMaker 官方无隶属关系。
 
 ### 使用前需要了解
 
-- `inspect_*` 读取磁盘中的项目资源和配置。服务不提供游戏截图、运行日志、断点、单步执行或运行时变量检查，也不启动游戏或控制 IDE。
-- 创建和编译项目仍在 GameMaker 中完成；资源热加载行为取决于 IDE，修改后应核对实际加载结果。
-- 不提供资源删除或重命名、已有 GML/事件覆盖、字体/路径/时间线/序列/扩展创建，以及 OGG/MP3 导入。
+- `inspect_*` 读取磁盘中的项目资源和配置；运行工具通过 Igor 构建并运行隔离副本。服务不控制 IDE 图形界面，不提供原生断点、暂停/逐行调试、鼠标输入或任意表达式求值。
+- 新建项目仍在 GameMaker 中完成；`run_game` 负责编译和运行绑定项目的副本。资源热加载行为取决于 IDE，修改后应核对实际加载结果。
+- 安装测试桥接会修改源项目的启动房间和 `.yyp`；这是一次可撤销事务。运行前先停止旧会话，运行副本和存档会在停止后删除。
+- 运行的项目以当前用户权限执行；只应对受信任项目启用 `--allow-run`。
+- 不提供资源删除或重命名、覆盖已有 GML/事件、字体/路径/时间线/序列/扩展创建，以及 OGG/MP3 导入。已有 GML 用 `read_code`/`update_code` 修改。
 - 精灵编辑不增删帧、不缩放、裁剪或调色；显示配置不包含其他平台、GUI 尺寸或运行时窗口切换代码。
-- 结构校验只检查工具支持的格式和引用关系，不能代替 IDE 编译或游戏运行测试。
+- 结构校验只检查工具支持的格式和引用关系，不能代替 Igor 编译或实际游戏运行测试。
 - 拒绝越界路径、符号链接及目录联接；名为 `参考项目` 的目录及其子目录不能绑定。
 
 使用问题和功能建议可提交到 [Issues](https://github.com/MKTLMORX/morx-gms2-mcp/issues)。测试与构建见[贡献指南](CONTRIBUTING.md)，数据边界见[安全说明](SECURITY.md)，版本变化见[更新记录](CHANGELOG.md)。
 
 ## English quick start
 
-MORX GMS2 MCP provides a local tool foundation for AI-assisted GameMaker development. Let an assistant inspect your project, create resources, adjust animation and display settings, and refine the result using feedback from playtests. It exposes 24 stdio tools with previews, backups and rollback.
+MORX GMS2 MCP provides a local tool foundation for AI-assisted GameMaker development. Let an assistant inspect your project, create and edit resources, build and run an isolated Windows copy, observe the game, and refine the result using real feedback. It exposes 35 stdio tools with previews, backups and rollback.
 
-Use an inspect → author → run and observe → adjust workflow. The AI client coordinates the work; this server handles project files and resources. Running the game, capturing its viewport and inspecting live variables require separate GameMaker or client tools. Existing GML can be edited with the client's file tools. Installing this server alone does not connect an assistant to the running game or its debugger.
+Use an inspect → author → run and observe → adjust workflow. The AI client coordinates the work; this server handles project files, resources, GML and isolated runs. Runtime observation uses the server's own bridge inside the game, not desktop capture. IDE GUI control and native breakpoint/step debugging remain outside its scope.
 
 1. Clone this repository, create a Python 3.10+ virtual environment, and install with `python -m pip install .` inside that environment. Use this repository as the installation source; there is no official PyPI package.
 2. Create and save a test project in GameMaker. Run `python -m morx_gms2_mcp bind --project <project>` and then `check --project <project>`.
 3. Generate configuration with `client-config --project <project> --client codex` or `--client claude`. Add `--write` only when resource writes are intended. Merge the result into the client configuration and reconnect.
 4. Verify the target with `server_info`. Mutation tools default to `dry_run=true`; execution requires both a writable server and explicit `dry_run=false`.
+5. For runtime observation, start with `--allow-run` and the Runtime/user-folder options, run `install_runtime_bridge` (preview first), then `run_game`. Poll `runtime_status` until `bridge_ready=true` before calling `capture_game`, `inspect_game`, `wait_game_frames` or `send_game_input`. Finish with `stop_game`; the isolated build copy and save directory are removed.
 
 Use `inspect_sprite` before `configure_sprite` or `set_sprite_animation`. Reordering requires every existing frame ID exactly once; durations are positive animation timeline units in the resulting order, not seconds. Omitted durations stay attached to their frames. Pass the returned `sha256` as `expected_sha256` to reject stale edits. Only ordinary continuous bitmap timelines are supported; events and moments prevent retiming. PNG files are preserved. Reordering changes image indices.
 
 Use `inspect_display_settings` before `configure_windows_display` or `configure_room_display`. Windows edits require an existing GMWindowsOptions v2 file. Room, camera and viewport dimensions are independent; enabling views requires at least one visible viewport. Inherited room display settings are not edited. Use the corresponding Windows or room hash to reject stale writes. Borderless windows and borderless fullscreen are distinct; runtime code and the OS may override startup behavior. GUI sizes and runtime GML are not edited.
 
-The verified environment is Windows with GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23, targeting Windows VM. Test a copy of your project when using other versions or platforms.
+Runtime tools are disabled by default. Start the server with `--allow-run --runtime-root <runtime> --user-directory <logged-in user folder>` in addition to `--write` when GML edits are needed. `install_runtime_bridge` adds a managed persistent test object and room instance; preview it first. `run_game` builds a Windows VM copy under the user's local app data, then returns a session ID. Poll `runtime_status` until `bridge_ready` is true. Use `capture_game`, `inspect_game` and `get_runtime_output` to observe; use `wait_game_frames` and `send_game_input` for playback and input. `stop_game` ends the session and removes the build copy and save directory. Only one session is active; the maximum lifetime is 15 minutes. The game runs with your user privileges, so enable `--allow-run` only for trusted projects.
 
-Existing GML and events are not overwritten. Do not save in the IDE while the server is writing. Multi-file transactions are not fully atomic. This server reads project files; it does not capture the running game, read runtime variables, set breakpoints, launch or compile projects, or control the IDE. Sprite frame creation/removal, image editing and display options for other platforms are outside its scope.
+The verified environment is Windows with GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23, targeting Windows VM. The run chain was verified end to end: bridge readiness, capture including DrawGUI content, live instance values, frame waits, keyboard input, stop and cleanup. IDE GUI interaction was not part of that verification. Test a copy of your project when using other versions or platforms.
+
+Existing GML and events are not overwritten by creation tools; use `read_code`/`update_code` for existing code. Do not save in the IDE while the server is writing. Multi-file transactions are not fully atomic. This server does not control the IDE, set breakpoints, pause/step the debugger, send mouse input or evaluate arbitrary expressions. Sprite frame creation/removal, image editing and display options for other platforms are outside its scope.
 
 Licensed under [MIT](LICENSE). Contributions and sanitized bug reports are welcome.
 

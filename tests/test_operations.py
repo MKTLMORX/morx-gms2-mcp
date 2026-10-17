@@ -91,7 +91,7 @@ class OperationTests(ProjectFixture):
         self.assertEqual(self.project.metadata()['Folders'], [])
 
     def test_binding_and_client_config(self):
-        (self.root / '.mcp-probe-project').unlink()
+        (self.root / '.codex/gms2-resource-binding.json').unlink()
         self.assertEqual(bind(self.root), bind(self.root))
         self.assertEqual(Project(self.root).yyp, self.project.yyp)
         claude = json.loads(client_config(self.root, 'claude', True))['mcpServers']['morx-gms2-mcp']
@@ -104,7 +104,7 @@ class OperationTests(ProjectFixture):
             Project(self.root)
 
     def test_binding_normalizes_project_path(self):
-        (self.root / '.mcp-probe-project').unlink()
+        (self.root / '.codex/gms2-resource-binding.json').unlink()
         result = bind(self.root / 'rooms' / '..')
         self.assertEqual(Path(result['bound']), self.project.yyp)
         self.assertEqual(bind(self.root), result)

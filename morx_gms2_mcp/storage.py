@@ -19,6 +19,11 @@ def encode(data):
     return (json.dumps(data, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
 
 
+def compact_encode(data):
+    """单行 JSON；游戏内 GML 文本读取按行处理时使用。"""
+    return (json.dumps(data, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
+
+
 def parse_yy(text):
     text = text.lstrip('\ufeff')
     out, quoted, escaped = [], False, False
@@ -98,13 +103,12 @@ class Storage:
             raise ValueError('目录必须恰好包含一个 yyp')
         self.yyp = self.path(projects[0].name)
         self.writable = writable
-        if not (self.root / '.mcp-probe-project').is_file():
-            binding_path = self.path('.codex/gms2-resource-binding.json')
-            if not binding_path.is_file():
-                raise ValueError('缺少项目绑定文件；禁止隐式绑定其他项目')
-            binding = json.loads(binding_path.read_text(encoding='utf-8-sig'))
-            if Path(binding['project']).resolve() != self.yyp or binding.get('format') != 1:
-                raise ValueError('项目绑定与启动目标不一致')
+        binding_path = self.path('.codex/gms2-resource-binding.json')
+        if not binding_path.is_file():
+            raise ValueError('缺少项目绑定文件；禁止隐式绑定其他项目')
+        binding = json.loads(binding_path.read_text(encoding='utf-8-sig'))
+        if Path(binding['project']).resolve() != self.yyp or binding.get('format') != 1:
+            raise ValueError('项目绑定与启动目标不一致')
         self.lock = ProjectLock(self.path('.codex/gms2-resource.lock'))
         self.journal = self.path('.codex/gms2-resource-backups')
 

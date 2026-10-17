@@ -13,7 +13,6 @@ class ProjectFixture(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        (self.root / '.mcp-probe-project').touch()
         (self.root / 'test.yyp').write_bytes(encode({'$GMProject': 'v1', 'resourceType': 'GMProject',
             'name': 'test', 'Folders': [], 'TextureGroups': [{'name': 'Default'}],
             'AudioGroups': [{'name': 'audiogroup_default'}],
@@ -24,6 +23,9 @@ class ProjectFixture(unittest.TestCase):
         room.write_bytes(encode({'name': 'Room1', 'resourceType': 'GMRoom',
             'layers': [{'name': 'Instances', 'resourceType': 'GMRInstanceLayer', 'instances': []}],
             'instanceCreationOrder': []}))
+        binding = self.root / '.codex/gms2-resource-binding.json'
+        binding.parent.mkdir()
+        binding.write_bytes(encode({'format': 1, 'project': str((self.root / 'test.yyp').resolve())}))
         self.project = Project(self.root)
 
 
@@ -37,7 +39,7 @@ class ProjectTests(ProjectFixture):
         for name in ('../bad', 'CON', 'a/b', 'bad name'):
             with self.assertRaises(ValueError):
                 name_check(name)
-        (self.root / '.mcp-probe-project').unlink()
+        (self.root / '.codex/gms2-resource-binding.json').unlink()
         with self.assertRaises(ValueError):
             Project(self.root)
 

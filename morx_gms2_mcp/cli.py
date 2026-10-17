@@ -38,22 +38,30 @@ def bind(root):
     return {'bound': str(projects[0]), 'binding': str(dest)}
 
 
-def client_config(root, client, write):
+def client_config(root, client, write, runtime_options=None):
     args = ['-m', 'morx_gms2_mcp', 'serve', '--project', str(root)]
     if write:
         args.append('--write')
+    if runtime_options and runtime_options.enabled:
+        args.append('--allow-run')
+        for flag, value in (('--runtime-root', runtime_options.runtime_root),
+                            ('--user-directory', runtime_options.user_directory)):
+            if value:
+                args.extend([flag, value])
     env = {'PYTHONIOENCODING': 'utf-8', 'PYTHONUTF8': '1'}
     if client == 'claude':
         return json.dumps({'mcpServers': {'morx-gms2-mcp': {'type': 'stdio',
             'command': sys.executable, 'args': args, 'env': env}}}, ensure_ascii=False, indent=2)
     quote = lambda text: json.dumps(text, ensure_ascii=False)
-    return '\n'.join(['[mcp_servers.morx-gms2-mcp]', 'command = ' + quote(sys.executable),
+    lines = ['[mcp_servers.morx-gms2-mcp]', 'command = ' + quote(sys.executable),
         'args = [' + ', '.join(quote(a) for a in args) + ']', 'startup_timeout_sec = 30', 'tool_timeout_sec = 60',
-        '[mcp_servers.morx-gms2-mcp.env]', 'PYTHONIOENCODING = "utf-8"', 'PYTHONUTF8 = "1"'])
+        '[mcp_servers.morx-gms2-mcp.env]']
+    lines += [f'{key} = {quote(value)}' for key, value in env.items()]
+    return '\n'.join(lines)
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='GameMaker 资源 MCP；固定项目，默认只读服务。')
+    parser = argparse.ArgumentParser(description='GameMaker 制作与运行观察 MCP；固定项目，默认只读，运行须单独启用。')
     parser.add_argument('--version', action='version', version=__version__)
     commands = parser.add_subparsers(dest='command', required=True)
     for name in ('bind', 'check', 'serve', 'client-config'):
@@ -61,15 +69,21 @@ def main(argv=None):
         sub.add_argument('--project', '--project-root', dest='project', required=True)
         if name in ('serve', 'client-config'):
             sub.add_argument('--write', action='store_true', help='允许显式 dry_run=false 的资源变更')
+            sub.add_argument('--allow-run', action='store_true', help='允许构建及运行受信任项目的隔离副本')
+            sub.add_argument('--runtime-root', help='已安装的 GameMaker Runtime 根目录')
+            sub.add_argument('--user-directory', help='已登录 GameMaker 的本机用户目录；不复制许可证')
         if name == 'client-config':
             sub.add_argument('--client', choices=('claude', 'codex'), required=True)
     args = parser.parse_args(argv)
     try:
         root = root_path(args.project)
+        from .runtime import RuntimeOptions
+        runtime_options = RuntimeOptions(getattr(args, 'allow_run', False),
+            getattr(args, 'runtime_root', None), getattr(args, 'user_directory', None))
         if args.command == 'bind':
             print(json.dumps(bind(root), ensure_ascii=False))
         elif args.command == 'client-config':
-            print(client_config(root, args.client, args.write))
+            print(client_config(root, args.client, args.write, runtime_options))
         elif args.command == 'check':
             from .resources import Project
             result = Project(root, writable=False).validate()
@@ -78,6 +92,6 @@ def main(argv=None):
                 raise SystemExit(1)
         else:
             from .server import build_server
-            build_server(root, args.write).run(transport='stdio')
+            build_server(root, args.write, runtime_options).run(transport='stdio')
     except (OSError, ValueError, KeyError) as exc:
         parser.exit(2, f'错误：{exc}\n')

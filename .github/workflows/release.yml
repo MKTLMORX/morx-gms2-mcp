@@ -44,7 +44,26 @@ jobs:
         with:
           name: dist
           path: dist/
+      - name: Check whether this version is already on PyPI
+        id: pypi
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import glob
+          import urllib.error
+          import urllib.request
+          version = glob.glob('dist/*.whl')[0].rsplit('/', 1)[-1].split('-')[1]
+          try:
+              urllib.request.urlopen(
+                  f'https://pypi.org/pypi/morx-gms2-mcp/{version}/json', timeout=30)
+          except urllib.error.HTTPError as exc:
+              if exc.code != 404:
+                  raise
+              print('exists=false')
+          else:
+              print('exists=true')
+          PY
       - uses: pypa/gh-action-pypi-publish@release/v1
+        if: steps.pypi.outputs.exists != 'true'
         with:
           packages-dir: dist/
   github-release:
@@ -60,4 +79,9 @@ jobs:
           path: dist/
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/* --generate-notes --verify-tag
+        run: |
+          if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release ${{ github.ref_name }} already exists"
+          else
+            gh release create "${{ github.ref_name }}" dist/* --repo "${{ github.repository }}" --generate-notes --verify-tag
+          fi

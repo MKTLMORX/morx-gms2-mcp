@@ -1,5 +1,23 @@
 # 更新记录
 
+## 0.5.0.dev0 — 未发布
+
+- 修复运行桥接文件在 Windows 上被同时读取时，原子替换偶发抛出 `PermissionError` 的问题；替换失败会短暂重试。
+- `inspect_game` 新增 `scope='globals'` 和 `instance_id`，可读取全局变量及单个实例；`instance_id` 可直接使用返回的 `@ref instance(...)` 标识。
+- 实例和全局变量中的数组、结构体会按深度 3、每个变量 64 个节点、每层 32 项展开，超出部分标记截断；仍不执行表达式。
+- `send_game_input` 默认改为窗口消息模式：投递 `WM_KEYDOWN`/`WM_KEYUP`，可触发 `keyboard_check_pressed`、KeyPress 和 KeyRelease，不需要前台焦点；`mode='state'` 保留原桥接按住状态行为。
+- `run_game_sequence` 的 input 动作支持 `mode` 参数，默认使用窗口消息。
+- 新增 `delete_resource`：拒绝删除仍被其他资源引用的资源，删除前列出文件，走事务备份。
+- 新增 `rename_resource`：移动资源文件，更新 `.yyp`、排序文件和资源引用，同步碰撞事件文件名；不重写 GML 中的资源名。
+- 新增 `set_game_variables`：按名称写入实例或全局变量，返回旧值；支持布尔、数值、字符串、数组和结构体，限制深度、数量和序列化大小；默认拒绝不存在的变量，`create_missing=true` 才允许新建。
+- 新增 `spawn_game_instance` 和 `destroy_game_instance`：在当前运行房间创建实例或按实例 ID/物体名销毁实例；正常触发引擎事件，拒绝操作受管理的测试桥接。
+- `run_game_sequence` 新增 `set`、`spawn`、`destroy` 动作，可与等待、输入、状态、截图和事件组合。
+- 新增 `remove_object_event`：删除物体已有事件及其 GML 文件，支持预览、哈希保护和事务恢复；拒绝 GML Visual 事件。
+- `import_sound` 支持 OGG Vorbis，读取采样率、声道和时长；声音描述改为 GameMaker 2026 的 `channelFormat`/`compressionQuality` 字段，不再写入已移除的 `bitRate`/`type`。
+- 新增 `import_font`：将 TTF/TTE/OTF/TTC 作为 IncludedFile 导入 `datafiles/fonts`，返回运行时路径和 `font_add` 示例；不烘焙 GMFont 资源。
+- 真实验收通过：实例/全局变量写入、缺失变量拒绝、实例生成与按 ID/物体名销毁、组合序列、事件删除、真实 OGG/WAV 资源编译与 `audio_exists`、真实 TTF 通过 `font_add` 加载；停止后副本和存档已清理。
+- 工具数增至 51，自动测试增至 109 项。
+
 ## 0.4.1 — 2026-10-17
 
 - 重新整理 README：PyPI/pipx 安装优先、步骤化快速开始、亮点和运行链路；PyPI 徽章改为静态版本，避免图片代理缓存显示 not found。

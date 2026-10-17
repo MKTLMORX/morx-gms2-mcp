@@ -1,17 +1,28 @@
 # MORX GMS2 MCP
 
 [![CI](https://github.com/MKTLMORX/morx-gms2-mcp/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/MKTLMORX/morx-gms2-mcp/actions/workflows/tests.yml)
-[![PyPI](https://img.shields.io/pypi/v/morx-gms2-mcp.svg)](https://pypi.org/project/morx-gms2-mcp/)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![PyPI 0.4.1](https://img.shields.io/badge/PyPI-0.4.1-3775A9?style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/morx-gms2-mcp/)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
+[![Windows](https://img.shields.io/badge/Platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)](#适用范围)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 
 **让 AI 助手参与 GameMaker 项目的制作、运行、检查与迭代。**
 
-A local MCP foundation for AI-assisted GameMaker development: understand projects, create and edit resources, build and run an isolated Windows copy, observe the game, and iterate using real feedback. Works with Codex and Claude Code.
+MORX GMS2 MCP 是一个本地 stdio MCP 服务：AI 先理解项目，再制作资源、修改 GML、调整动画与显示设置；随后通过隔离的 Windows VM 副本编译运行，读取画面、实例状态、日志和运行时异常，并根据真实反馈继续修改。所有修改默认先预览，写入保留事务备份。
 
-[开发工作流](#开发工作流) · [快速开始](#快速开始) · [连接客户端](#连接客户端) · [使用示例](#使用示例) · [运行与观察](#运行与观察) · [工具清单](#工具清单) · [适用范围](#适用范围) · [English](#english-quick-start)
+*Author, run, observe, and iterate on GameMaker projects with real feedback.*
 
-MORX GMS2 MCP 为 AI 助手提供操作 GameMaker 项目的工具接口。让助手先理解项目结构，再制作资源、调整动画与显示设置，通过隔离的 Windows VM 副本编译运行游戏，读取画面、实例状态和日志，并根据实际运行结果继续修改。修改可以先预览，写入后保留备份，方便检查和撤销。
+**真实闭环** · **安全默认** · **数据输入** · **44 个工具** · **MIT**
+
+[快速开始](#快速开始) · [能做什么](#能做什么) · [连接客户端](#连接客户端) · [使用示例](#使用示例) · [运行与观察](#运行与观察) · [工具清单](#工具清单) · [English](#english-quick-start)
+
+## 亮点
+
+- **真实运行闭环**：编译 → 运行 → 截图 / 实例状态 / 日志 / 异常 → 修改 → 再验证。
+- **安全默认**：所有修改先预览；写入有 SHA-256 冲突检测、事务备份和撤销。
+- **数据输入**：KeyPress、Mouse、Collision 等事件可通过桥接数据触发，不依赖物理键鼠。
+- **隔离运行**：独立项目副本和存档目录；停止后自动清理。
+- **不操控 IDE**：不抓取桌面、不控制 IDE 图形界面；运行时信息来自游戏内桥接。
 
 ## 能做什么
 
@@ -44,11 +55,18 @@ MORX GMS2 MCP 为 AI 助手提供操作 GameMaker 项目的工具接口。让助
 
 ## 快速开始
 
-需要 Python 3.10+、支持本地 stdio MCP 的客户端，以及由 GameMaker 创建并保存的项目。建议先用独立测试项目熟悉操作。以下命令在 Windows PowerShell 中运行。
+需要 Windows、Python 3.10+、一个由 GameMaker 创建并保存的项目，以及支持本地 stdio 的 MCP 客户端。建议先用独立测试项目熟悉操作；以下命令在 Windows PowerShell 中运行。
 
-**1. 安装到独立环境**
+### 1. 安装
 
-从 PyPI 安装（推荐）：
+推荐用 [pipx](https://pipx.pypa.io/) 安装为独立命令：
+
+```powershell
+pipx install morx-gms2-mcp
+morx-gms2-mcp --version
+```
+
+也可以装进 venv：
 
 ```powershell
 python -m venv .venv
@@ -57,14 +75,8 @@ $mcpPython = (Resolve-Path '.venv\Scripts\python.exe').Path
 & $mcpPython -m morx_gms2_mcp --version
 ```
 
-也可以用 [pipx](https://pipx.pypa.io/) 安装为独立命令：
-
-```powershell
-pipx install morx-gms2-mcp
-morx-gms2-mcp --version
-```
-
-从源码安装：
+<details>
+<summary>从源码安装</summary>
 
 ```powershell
 git clone https://github.com/MKTLMORX/morx-gms2-mcp.git
@@ -75,26 +87,28 @@ $mcpPython = (Resolve-Path '.venv\Scripts\python.exe').Path
 & $mcpPython -m morx_gms2_mcp --version
 ```
 
+</details>
+
 依赖版本见 [pyproject.toml](pyproject.toml)。
 
-**2. 绑定并检查项目**
+### 2. 绑定并检查项目
 
 ```powershell
 $gameProject = 'D:\Games\MyGame' # 替换为你的测试项目
-& $mcpPython -m morx_gms2_mcp bind --project $gameProject
-& $mcpPython -m morx_gms2_mcp check --project $gameProject
+morx-gms2-mcp bind --project $gameProject
+morx-gms2-mcp check --project $gameProject
 ```
 
-`--project` 也接受 `.yyp` 文件路径。目录须恰有一个现代 `GMProject v1` 的 `.yyp`；服务不创建空项目。
+用 venv 安装时，把 `morx-gms2-mcp` 换成 `& $mcpPython -m morx_gms2_mcp`。`--project` 也接受 `.yyp` 文件路径。目录须恰有一个现代 `GMProject v1` 的 `.yyp`；服务不创建空项目。
 
 ## 连接客户端
 
-**3. 生成对应客户端的配置**
+### 3. 生成配置
 
 ```powershell
 # 按你使用的客户端选择一条
-& $mcpPython -m morx_gms2_mcp client-config --project $gameProject --client codex --write
-& $mcpPython -m morx_gms2_mcp client-config --project $gameProject --client claude --write
+morx-gms2-mcp client-config --project $gameProject --client codex --write
+morx-gms2-mcp client-config --project $gameProject --client claude --write
 ```
 
 | 客户端 | 将生成内容合并到 | 示例 |
@@ -102,14 +116,14 @@ $gameProject = 'D:\Games\MyGame' # 替换为你的测试项目
 | Codex | 游戏项目的 `.codex/config.toml` | [TOML 示例](examples/codex.config.toml) |
 | Claude Code | 游戏项目的 `.mcp.json` | [JSON 示例](examples/claude.mcp.json) |
 
-复制命令输出，合并到对应配置文件，再重新加载客户端。`client-config` 不会自动写入配置文件；合并时保留已有服务。Claude Code 可能要求确认项目信任。去掉 `--write` 可保持资源只读，允许查询和预览，拒绝实际修改；运行能力由 `--allow-run` 单独控制。使用 pipx 或 `uvx` 安装时，将命令中的 `$mcpPython -m morx_gms2_mcp` 换成 `morx-gms2-mcp` 或 `uvx morx-gms2-mcp`。
+`client-config` 只输出配置，不会自动合并；保留文件中已有服务，然后重新加载客户端。Claude Code 可能要求确认项目信任。去掉 `--write` 可保持资源只读，允许查询和预览，拒绝实际修改；运行能力由 `--allow-run` 单独控制。使用 venv 时把 `morx-gms2-mcp` 换成 `& $mcpPython -m morx_gms2_mcp`。
 
 生成的配置把单次工具调用上限设为 180 秒（Claude Code 的 `timeout` 以毫秒计），因为 `wait_game_frames` 等待较多帧时可能合法地阻塞超过默认的 60 秒。较早的 Claude Code 版本若不支持 `timeout` 字段，可在启动前设置 `MCP_TOOL_TIMEOUT=180000`。
 
 需要运行能力时，在生成配置时同时传入运行参数：
 
 ```powershell
-& $mcpPython -m morx_gms2_mcp client-config --project $gameProject --client claude --write `
+morx-gms2-mcp client-config --project $gameProject --client claude --write `
   --allow-run --runtime-root '<Runtime 目录>' --user-directory '<已登录用户目录>'
 ```
 
@@ -119,15 +133,17 @@ $gameProject = 'D:\Games\MyGame' # 替换为你的测试项目
 也可以在游戏项目目录使用 Claude Code 的本地作用域注册：
 
 ```powershell
-claude mcp add --scope local --transport stdio morx-gms2-mcp -- "D:\Tools\gms2-mcp\.venv\Scripts\python.exe" -m morx_gms2_mcp serve --project "D:\Games\MyGame" --write
+claude mcp add --scope local --transport stdio morx-gms2-mcp -- morx-gms2-mcp serve --project "D:\Games\MyGame" --write
 claude mcp get morx-gms2-mcp
 ```
 
-若 PowerShell 的 `claude.ps1` 包装器未正确传递参数，可直接调用 `claude.exe`，或使用上文生成的 JSON 配置。
+使用 venv 时，把命令中的 `morx-gms2-mcp serve` 换成 `"D:\Tools\gms2-mcp\.venv\Scripts\python.exe" -m morx_gms2_mcp serve`。若 PowerShell 的 `claude.ps1` 包装器未正确传递参数，可直接调用 `claude.exe`，或使用上文生成的 JSON 配置。
 
 </details>
 
-连接后，先调用 `server_info` 核对项目路径和写入模式。一个服务固定绑定一个项目；管理多个项目时，分别配置服务。迁移项目后须核对并重新绑定，绑定文件位于 `.codex/gms2-resource-binding.json`。
+### 4. 连接并验证
+
+重新加载客户端后，先调用 `server_info` 核对项目路径、写入模式和运行能力。一个服务固定绑定一个项目；管理多个项目时，分别配置服务。迁移项目后需要重新绑定，绑定文件位于 `.codex/gms2-resource-binding.json`。
 
 ## 使用示例
 
@@ -180,6 +196,10 @@ claude mcp get morx-gms2-mcp
 
 运行能力通过 GameMaker 自带的 Igor 命令行构建 Windows VM 目标，并在用户目录中运行独立副本。它与资源写入开关分开，默认关闭。
 
+```text
+install_runtime_bridge → run_game → runtime_status → capture_game / inspect_game / trigger_game_event → stop_game
+```
+
 **启用条件**
 
 - 服务启动时额外传入 `--allow-run`、`--runtime-root <runtime 目录>`、`--user-directory <已登录用户目录>`；用户目录下应直接有 `licence.plist`，服务只检查存在性，不读取或复制许可证内容。
@@ -219,6 +239,13 @@ claude mcp get morx-gms2-mcp
 - 结构校验不等于编译成功；以 Igor 日志和实际游戏画面为准。
 
 ## 工具清单
+
+| 分组 | 代表工具 |
+| --- | --- |
+| 运行与观察 | `run_game`、`runtime_status`、`capture_game`、`inspect_game`、`trigger_game_event` |
+| 项目与资源 | `inspect_project`、`create_script`、`create_object`、`create_room` |
+| 美术与显示 | `import_sprite`、`create_tileset`、`configure_room_display` |
+| 修改与恢复 | `read_code`、`update_code`、`list_backups`、`restore_backup` |
 
 <details>
 <summary>展开全部 44 个工具</summary>

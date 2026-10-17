@@ -26,7 +26,7 @@ wheel、sdist 和按白名单生成的公开源码 ZIP 位于 `dist/`。涉及�
 
 ## 发布
 
-版本号同时写在 `pyproject.toml` 和 `morx_gms2_mcp/__init__.py`，发布前更新 `CHANGELOG.md`，然后运行测试、`python -m build` 和 `python scripts/build_release.py`。
+版本号同时写在 `pyproject.toml` 和 `morx_gms2_mcp/__init__.py`，发布前更新 `CHANGELOG.md` 和 README 顶部的静态 PyPI 版本徽章，然后运行测试、`python -m build` 和 `python scripts/build_release.py`。静态徽章不依赖图片代理的实时查询，可以避免新版本刚发布时显示 not found。
 
 PyPI 发布使用 GitHub Actions 的 OpenID Connect（Trusted Publishing），不需要保存 API token。首次发布前，在 PyPI 的 **Publishing** 页面添加一个 pending publisher：
 
@@ -38,4 +38,4 @@ PyPI 发布使用 GitHub Actions 的 OpenID Connect（Trusted Publishing），�
 | Workflow name | `release.yml` |
 | Environment name | 留空 |
 
-配置完成后推送版本标签，例如 `v0.4.0`。`.github/workflows/release.yml` 会构建 wheel/sdist，通过 OIDC 发布到 PyPI，并创建同名 GitHub Release。也可以在 GitHub Actions 页面手动运行 `release` 工作流；手动运行只发布 PyPI，不创建 Release。工作流只申请 `id-token: write`，不读取或保存 PyPI 凭据。标签必须与包版本一致（`v0.4.0` 对应 `0.4.0`），否则构建任务会失败。
+配置完成后推送版本标签，例如 `v0.4.1`。`.github/workflows/release.yml` 会构建 wheel/sdist，通过 OIDC 发布到 PyPI，并创建同名 GitHub Release。也可以在 GitHub Actions 页面手动运行 `release` 工作流；手动运行只发布 PyPI，不创建 Release。工作流只申请 `id-token: write`，不读取或保存 PyPI 凭据。标签必须与包版本一致（`v0.4.1` 对应 `0.4.1`），否则构建任务会失败。

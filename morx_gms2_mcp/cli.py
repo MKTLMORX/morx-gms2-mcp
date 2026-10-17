@@ -51,10 +51,11 @@ def client_config(root, client, write, runtime_options=None):
     env = {'PYTHONIOENCODING': 'utf-8', 'PYTHONUTF8': '1'}
     if client == 'claude':
         return json.dumps({'mcpServers': {'morx-gms2-mcp': {'type': 'stdio',
-            'command': sys.executable, 'args': args, 'env': env}}}, ensure_ascii=False, indent=2)
+            'command': sys.executable, 'args': args, 'env': env, 'timeout': 180000}}},
+            ensure_ascii=False, indent=2)
     quote = lambda text: json.dumps(text, ensure_ascii=False)
     lines = ['[mcp_servers.morx-gms2-mcp]', 'command = ' + quote(sys.executable),
-        'args = [' + ', '.join(quote(a) for a in args) + ']', 'startup_timeout_sec = 30', 'tool_timeout_sec = 60',
+        'args = [' + ', '.join(quote(a) for a in args) + ']', 'startup_timeout_sec = 30', 'tool_timeout_sec = 180',
         '[mcp_servers.morx-gms2-mcp.env]']
     lines += [f'{key} = {quote(value)}' for key, value in env.items()]
     return '\n'.join(lines)

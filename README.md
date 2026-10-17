@@ -85,6 +85,8 @@ $gameProject = 'D:\Games\MyGame' # 替换为你的测试项目
 
 复制命令输出，合并到对应配置文件，再重新加载客户端。`client-config` 不会自动写入配置文件；合并时保留已有服务。Claude Code 可能要求确认项目信任。去掉 `--write` 可保持资源只读，允许查询和预览，拒绝实际修改；运行能力由 `--allow-run` 单独控制。
 
+生成的配置把单次工具调用上限设为 180 秒（Claude Code 的 `timeout` 以毫秒计），因为 `wait_game_frames` 等待较多帧时可能合法地阻塞超过默认的 60 秒。较早的 Claude Code 版本若不支持 `timeout` 字段，可在启动前设置 `MCP_TOOL_TIMEOUT=180000`。
+
 需要运行能力时，在生成配置时同时传入运行参数：
 
 ```powershell

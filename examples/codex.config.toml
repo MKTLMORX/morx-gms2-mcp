@@ -2,7 +2,7 @@
 command = 'D:\Tools\gms2-mcp\.venv\Scripts\python.exe'
 args = ['-m', 'morx_gms2_mcp', 'serve', '--project', 'D:\Games\MyGame', '--write']
 startup_timeout_sec = 30
-tool_timeout_sec = 60
+tool_timeout_sec = 180
 
 [mcp_servers.morx-gms2-mcp.env]
 PYTHONIOENCODING = 'utf-8'

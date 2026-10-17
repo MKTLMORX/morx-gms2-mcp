@@ -10,6 +10,7 @@
 - 日志脱敏改为大小写不敏感，并覆盖存档目录和用户目录；截图读取后删除临时 PNG。
 - `inspect_game` 不再用源项目校验运行副本，桥接返回的错误按失败处理。
 - 移除测试用 `.mcp-probe-project` 绑定绕过；统一事件编号校验和实例结构；`client-config` 的 Codex 环境变量改为从同一份配置生成。
+- `client-config` 生成的单次工具调用上限改为 180 秒（Codex `tool_timeout_sec`、Claude Code `timeout`），避免 `wait_game_frames` 等待较多帧时被默认 60 秒截断。
 - 修正 Igor `Windows Run` 命令：不传 `/of`，由 Igor 在运行目录生成输出；传 `/of` 会导致 Runner 加载错误文件并退出。
 - 运行的链接检查改为 Windows reparse point 判断，覆盖控制文件、项目复制和清理，避免 GitHub Actions 临时目录的短路径被 `resolve()` 误判。
 - 新增运行、桥接修复、脱敏、清理和绑定测试，共 80 项通过。

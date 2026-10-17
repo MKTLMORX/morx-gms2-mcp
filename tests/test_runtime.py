@@ -281,12 +281,15 @@ class RuntimeTests(ProjectFixture):
 
     def test_runtime_flags_propagate_without_license_contents(self):
         config = json.loads(client_config(self.root, 'claude', True, self.options))
-        args = config['mcpServers']['morx-gms2-mcp']['args']
+        server = config['mcpServers']['morx-gms2-mcp']
+        args = server['args']
         self.assertIn('--allow-run', args)
         self.assertIn('--runtime-root', args)
         self.assertIn('--user-directory', args)
+        self.assertEqual(server['timeout'], 180000)
         self.assertNotIn('must never', json.dumps(config))
         codex = client_config(self.root, 'codex', True, self.options)
+        self.assertIn('tool_timeout_sec = 180', codex)
         self.assertIn('PYTHONIOENCODING = "utf-8"', codex)
         self.assertIn('PYTHONUTF8 = "1"', codex)
 

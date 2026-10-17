@@ -1,6 +1,6 @@
 # 更新记录
 
-## 0.4.0.dev1 — 未发布
+## 0.4.0 — 2026-10-17
 
 - 运行桥接新增未处理异常捕获；`get_runtime_errors` 按游标返回最多 20 条异常或桥接命令错误，并在 `runtime_status`/`stop_game` 中给出数量。
 - 新增 `trigger_game_event`：通过桥接数据执行 Keyboard/KeyPress/KeyRelease、Mouse、Collision、Alarm、User、Step/Other 等事件代码，不需要物理键鼠或前台焦点；Draw 事件不支持。它只执行事件代码，不更新真实按键、鼠标坐标或碰撞状态。

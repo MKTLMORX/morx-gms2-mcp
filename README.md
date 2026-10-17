@@ -1,6 +1,7 @@
 # MORX GMS2 MCP
 
 [![CI](https://github.com/MKTLMORX/morx-gms2-mcp/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/MKTLMORX/morx-gms2-mcp/actions/workflows/tests.yml)
+[![PyPI](https://img.shields.io/pypi/v/morx-gms2-mcp.svg)](https://pypi.org/project/morx-gms2-mcp/)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -47,6 +48,24 @@ MORX GMS2 MCP 为 AI 助手提供操作 GameMaker 项目的工具接口。让助
 
 **1. 安装到独立环境**
 
+从 PyPI 安装（推荐）：
+
+```powershell
+python -m venv .venv
+$mcpPython = (Resolve-Path '.venv\Scripts\python.exe').Path
+& $mcpPython -m pip install morx-gms2-mcp
+& $mcpPython -m morx_gms2_mcp --version
+```
+
+也可以用 [pipx](https://pipx.pypa.io/) 安装为独立命令：
+
+```powershell
+pipx install morx-gms2-mcp
+morx-gms2-mcp --version
+```
+
+从源码安装：
+
 ```powershell
 git clone https://github.com/MKTLMORX/morx-gms2-mcp.git
 cd morx-gms2-mcp
@@ -56,7 +75,7 @@ $mcpPython = (Resolve-Path '.venv\Scripts\python.exe').Path
 & $mcpPython -m morx_gms2_mcp --version
 ```
 
-请使用本仓库安装；本项目未提供官方 PyPI 包。依赖版本见 [pyproject.toml](pyproject.toml)。
+依赖版本见 [pyproject.toml](pyproject.toml)。
 
 **2. 绑定并检查项目**
 
@@ -83,7 +102,7 @@ $gameProject = 'D:\Games\MyGame' # 替换为你的测试项目
 | Codex | 游戏项目的 `.codex/config.toml` | [TOML 示例](examples/codex.config.toml) |
 | Claude Code | 游戏项目的 `.mcp.json` | [JSON 示例](examples/claude.mcp.json) |
 
-复制命令输出，合并到对应配置文件，再重新加载客户端。`client-config` 不会自动写入配置文件；合并时保留已有服务。Claude Code 可能要求确认项目信任。去掉 `--write` 可保持资源只读，允许查询和预览，拒绝实际修改；运行能力由 `--allow-run` 单独控制。
+复制命令输出，合并到对应配置文件，再重新加载客户端。`client-config` 不会自动写入配置文件；合并时保留已有服务。Claude Code 可能要求确认项目信任。去掉 `--write` 可保持资源只读，允许查询和预览，拒绝实际修改；运行能力由 `--allow-run` 单独控制。使用 pipx 或 `uvx` 安装时，将命令中的 `$mcpPython -m morx_gms2_mcp` 换成 `morx-gms2-mcp` 或 `uvx morx-gms2-mcp`。
 
 生成的配置把单次工具调用上限设为 180 秒（Claude Code 的 `timeout` 以毫秒计），因为 `wait_game_frames` 等待较多帧时可能合法地阻塞超过默认的 60 秒。较早的 Claude Code 版本若不支持 `timeout` 字段，可在启动前设置 `MCP_TOOL_TIMEOUT=180000`。
 
@@ -338,7 +357,7 @@ MORX GMS2 MCP provides a local tool foundation for AI-assisted GameMaker develop
 
 Use an inspect → author → run and observe → adjust workflow. The AI client coordinates the work; this server handles project files, resources, GML and isolated runs. Runtime observation uses the server's own bridge inside the game, not desktop capture. IDE GUI control and native breakpoint/step debugging remain outside its scope.
 
-1. Clone this repository, create a Python 3.10+ virtual environment, and install with `python -m pip install .` inside that environment. Use this repository as the installation source; there is no official PyPI package.
+1. Install from PyPI with `python -m pip install morx-gms2-mcp` in a Python 3.10+ virtual environment, or use `pipx install morx-gms2-mcp` / `uvx morx-gms2-mcp`. To install from source, clone this repository and run `python -m pip install .` inside a virtual environment.
 2. Create and save a test project in GameMaker. Run `python -m morx_gms2_mcp bind --project <project>` and then `check --project <project>`.
 3. Generate configuration with `client-config --project <project> --client codex` or `--client claude`. Add `--write` only when resource writes are intended. Merge the result into the client configuration and reconnect.
 4. Verify the target with `server_info`. Mutation tools default to `dry_run=true`; execution requires both a writable server and explicit `dry_run=false`.

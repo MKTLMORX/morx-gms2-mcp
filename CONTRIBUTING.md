@@ -38,4 +38,4 @@ PyPI 发布使用 GitHub Actions 的 OpenID Connect（Trusted Publishing），�
 | Workflow name | `release.yml` |
 | Environment name | 留空 |
 
-配置完成后推送版本标签，例如 `v0.4.1`。`.github/workflows/release.yml` 会构建 wheel/sdist，通过 OIDC 发布到 PyPI，并创建同名 GitHub Release。也可以在 GitHub Actions 页面手动运行 `release` 工作流；手动运行只发布 PyPI，不创建 Release。工作流只申请 `id-token: write`，不读取或保存 PyPI 凭据。标签必须与包版本一致（`v0.4.1` 对应 `0.4.1`），否则构建任务会失败。
+配置完成后推送版本标签，例如 `v0.5.0`。`.github/workflows/release.yml` 会构建 wheel/sdist，通过 OIDC 发布到 PyPI，并创建同名 GitHub Release。也可以在 GitHub Actions 页面手动运行 `release` 工作流；手动运行只发布 PyPI，不创建 Release。工作流只申请 `id-token: write`，不读取或保存 PyPI 凭据。标签必须与包版本一致（`v0.5.0` 对应 `0.5.0`），否则构建任务会失败。

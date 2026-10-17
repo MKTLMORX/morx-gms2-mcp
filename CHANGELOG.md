@@ -1,6 +1,6 @@
 # 更新记录
 
-## 0.5.0.dev0 — 未发布
+## 0.5.0 — 2026-10-17
 
 - 修复运行桥接文件在 Windows 上被同时读取时，原子替换偶发抛出 `PermissionError` 的问题；替换失败会短暂重试。
 - `inspect_game` 新增 `scope='globals'` 和 `instance_id`，可读取全局变量及单个实例；`instance_id` 可直接使用返回的 `@ref instance(...)` 标识。

@@ -2,9 +2,10 @@
 from __future__ import annotations
 import io
 import math
+import os
 import re
 import wave
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from PIL import Image
 from . import schemas
 from .storage import Storage, digest, encode, parse_yy
@@ -101,6 +102,37 @@ def walk_layers(layers):
     for layer in layers:
         yield layer
         yield from walk_layers(layer.get('layers', []))
+
+
+def find_refs(value, path, location='$'):
+    """查找带 name/path 且路径匹配的资源引用。精灵动画帧的 Id 也带目标路径，
+    但名称是帧 ID，因此不能只按名称匹配。
+    """
+    if isinstance(value, dict):
+        if 'name' in value and value.get('path') == path:
+            yield location
+        for key, child in value.items():
+            yield from find_refs(child, path, f'{location}.{key}')
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from find_refs(child, path, f'{location}[{index}]')
+
+
+def replace_refs(value, name, path, new_name, new_path):
+    """原地更新资源引用，返回更新数量；非资源名的引用只改路径。"""
+    count = 0
+    if isinstance(value, dict):
+        if 'name' in value and value.get('path') == path:
+            value['path'] = new_path
+            if value.get('name') == name:
+                value['name'] = new_name
+            count += 1
+        for child in value.values():
+            count += replace_refs(child, name, path, new_name, new_path)
+    elif isinstance(value, list):
+        for child in value:
+            count += replace_refs(child, name, path, new_name, new_path)
+    return count
 
 
 class Edit:
@@ -589,6 +621,185 @@ class Project(Storage):
             edit.save(ref['path'], data)
             return edit.commit(dry_run)
 
+    def _resource_files(self, relative):
+        root = self.path(relative)
+        if not root.is_dir():
+            raise ValueError('资源目录不存在：' + relative)
+        files = []
+        for current, directories, names in os.walk(root, followlinks=False):
+            for directory in directories:
+                self.path(Path(current, directory).relative_to(self.root).as_posix())
+            for filename in names:
+                rel = Path(current, filename).relative_to(self.root).as_posix()
+                self.path(rel)
+                if not Path(current, filename).is_file():
+                    raise ValueError('资源目录包含不支持的文件：' + rel)
+                files.append(rel)
+        return sorted(files)
+
+    def _resource_references(self, edit, ref):
+        references = []
+        project = edit.load(self.yyp.name)
+        for entry in project['resources']:
+            other = entry['id']
+            if other['path'] == ref['path']:
+                continue
+            data = edit.load(other['path'])
+            for location in find_refs(data, ref['path']):
+                references.append({'resource': other['name'], 'path': other['path'],
+                                   'field': location})
+        rest = {key: value for key, value in project.items()
+                if key not in ('resources', 'RoomOrderNodes')}
+        for location in find_refs(rest, ref['path']):
+            references.append({'resource': self.yyp.name, 'path': self.yyp.name,
+                               'field': location})
+        return references
+
+    def _check_expected(self, edit, ref, expected_sha256):
+        if expected_sha256 is None:
+            return
+        if not isinstance(expected_sha256, str) or not re.fullmatch('[a-f0-9]{64}', expected_sha256):
+            raise ValueError('expected_sha256 必须是 64 位小写十六进制')
+        if digest(edit.raw(ref['path'])) != expected_sha256:
+            raise ValueError('资源描述已被修改或不存在，请重新 inspect_resource 并预览')
+
+    def delete_resource(self, name, expected_sha256=None, dry_run=True):
+        """删除未被引用的资源及其目录；只删除已注册资源，不处理空分组。"""
+        with self.lock:
+            edit = Edit(self)
+            ref, data = self._ref(edit, name)
+            from .runtime_bridge import OBJECT
+            if name == OBJECT:
+                raise ValueError('受管理的测试桥接不能通过资源工具删除')
+            self._check_expected(edit, ref, expected_sha256)
+            references = self._resource_references(edit, ref)
+            if references:
+                shown = '; '.join(f"{item['resource']} ({item['field']})"
+                                  for item in references[:8])
+                raise ValueError('资源仍被引用，不能删除：' + shown)
+            project = edit.load(self.yyp.name)
+            project['resources'] = [entry for entry in project['resources']
+                                    if not (entry['id']['name'] == name and
+                                            entry['id']['path'] == ref['path'])]
+            warnings = ['未检查 GML 代码中的资源名；删除后请自行搜索并更新']
+            if data['resourceType'] == 'GMRoom':
+                nodes = project.get('RoomOrderNodes', [])
+                remaining = [node for node in nodes if not (
+                    node['roomId']['name'] == name and node['roomId']['path'] == ref['path'])]
+                if not remaining:
+                    raise ValueError('不能删除最后一个房间')
+                if nodes and nodes[0]['roomId']['path'] == ref['path']:
+                    warnings.append('删除的是启动房间，新的首房间将成为启动房间')
+                project['RoomOrderNodes'] = remaining
+            edit.save(self.yyp.name, project)
+            order_rel = self.yyp.with_suffix('.resource_order').name
+            order = edit.load(order_rel, {'FolderOrderSettings': [],
+                                          'ResourceOrderSettings': []})
+            order['ResourceOrderSettings'] = [
+                item for item in order.get('ResourceOrderSettings', [])
+                if not (item['name'] == name and item['path'] == ref['path'])]
+            edit.save(order_rel, order)
+            directory = PurePosixPath(ref['path']).parent.as_posix()
+            files = self._resource_files(directory)
+            for rel in files:
+                edit.raw(rel)
+                edit.changes[rel] = None
+            result = edit.commit(dry_run)
+            result.update({'name': name, 'resource_path': ref['path'],
+                           'deleted_files': files, 'warnings': warnings})
+            return result
+
+    def rename_resource(self, name, new_name, expected_sha256=None, dry_run=True):
+        """重命名资源，移动文件并更新资源引用；不修改 GML 代码中的名称。"""
+        name_check(new_name)
+        if name.casefold() == new_name.casefold():
+            raise ValueError('新名称必须与旧名称不同；不支持仅更改大小写')
+        with self.lock:
+            edit = Edit(self)
+            ref, data = self._ref(edit, name)
+            from .runtime_bridge import OBJECT
+            if name == OBJECT or new_name == OBJECT:
+                raise ValueError('受管理的测试桥接不能通过资源工具重命名')
+            self._check_expected(edit, ref, expected_sha256)
+            project = edit.load(self.yyp.name)
+            if any(entry['id']['name'].casefold() == new_name.casefold()
+                   for entry in project['resources']):
+                raise ValueError('同名资源已存在')
+            kind = PurePosixPath(ref['path']).parts[0]
+            old_dir = f'{kind}/{name}'
+            new_dir = f'{kind}/{new_name}'
+            new_path = f'{new_dir}/{new_name}.yy'
+            target = self.path(new_dir)
+            if target.exists() and (not target.is_dir() or any(target.iterdir())):
+                raise ValueError('目标资源目录已存在且非空')
+            collision_moves = []
+            if data['resourceType'] == 'GMObject':
+                for entry in project['resources']:
+                    other = entry['id']
+                    if other['path'] == ref['path'] or other['path'].split('/')[0] != 'objects':
+                        continue
+                    other_data = edit.load(other['path'])
+                    if not any(event['eventType'] == 4 and
+                               (event.get('collisionObjectId') or {}).get('path') == ref['path']
+                               for event in other_data.get('eventList', [])):
+                        continue
+                    old_file = f'objects/{other["name"]}/Collision_{name}.gml'
+                    new_file = f'objects/{other["name"]}/Collision_{new_name}.gml'
+                    if edit.raw(new_file) is not None:
+                        raise ValueError('目标碰撞事件文件已存在：' + new_file)
+                    if edit.raw(old_file) is None:
+                        raise ValueError('碰撞事件文件缺失：' + old_file)
+                    collision_moves.append((old_file, new_file))
+            moves = []
+            for rel in self._resource_files(old_dir):
+                within = rel[len(old_dir) + 1:]
+                head, slash, tail = within.partition('/')
+                stem, dot, extension = head.partition('.')
+                if dot and stem == name:
+                    head = new_name + '.' + extension
+                new_rel = f'{new_dir}/{head}' + (f'/{tail}' if slash else '')
+                moves.append((rel, new_rel))
+            for old_rel, new_rel in moves + collision_moves:
+                edit.new(new_rel, edit.raw(old_rel))
+            for old_rel, _ in moves + collision_moves:
+                edit.changes[old_rel] = None
+            replaced = replace_refs(data, name, ref['path'], new_name, new_path)
+            data['name'] = new_name
+            if '%Name' in data:
+                data['%Name'] = new_name
+            if data.get('soundFile') in (name + '.wav', name + '.ogg'):
+                data['soundFile'] = new_name + data['soundFile'][len(name):]
+            edit.save(new_path, data)
+            for entry in project['resources']:
+                other = entry['id']
+                if other['path'] == ref['path']:
+                    continue
+                other_data = edit.load(other['path'])
+                changed = replace_refs(other_data, name, ref['path'], new_name, new_path)
+                if changed:
+                    edit.save(other['path'], other_data)
+                    replaced += changed
+            replaced += replace_refs(project, name, ref['path'], new_name, new_path)
+            edit.save(self.yyp.name, project)
+            order_rel = self.yyp.with_suffix('.resource_order').name
+            order = edit.load(order_rel, {'FolderOrderSettings': [],
+                                          'ResourceOrderSettings': []})
+            for item in order.get('ResourceOrderSettings', []):
+                if item.get('name') == name and item.get('path') == ref['path']:
+                    item['name'], item['path'] = new_name, new_path
+                    replaced += 1
+            replaced += replace_refs(order, name, ref['path'], new_name, new_path)
+            edit.save(order_rel, order)
+            result = edit.commit(dry_run)
+            result.update({'old_name': name, 'new_name': new_name,
+                           'old_path': ref['path'], 'new_path': new_path,
+                           'files': [{'from': old, 'to': new} for old, new in moves],
+                           'collision_files': [{'from': old, 'to': new}
+                                               for old, new in collision_moves],
+                           'references_updated': replaced,
+                           'warnings': ['GML 代码中的资源名不会自动更新']})
+            return result
+
     def add_event(self, name, event, code, number=0, collision_object=None, dry_run=False):
         typ, num, stem, collision = event_spec(event, number, collision_object)
         with self.lock:
@@ -614,6 +825,37 @@ class Project(Storage):
             edit.new(gml, code.encode('utf-8'))
             edit.save(ref['path'], obj)
             return edit.commit(dry_run)
+
+    def remove_event(self, name, event, number=0, collision_object=None, dry_run=True):
+        """删除物体事件及其 GML 文件；不删除物体，不修改其他事件。"""
+        typ, num, stem, collision = event_spec(event, number, collision_object)
+        with self.lock:
+            edit = Edit(self)
+            ref, obj = self._ref(edit, name, 'objects')
+            if typ == 4:
+                target = self._ref(edit, collision, 'objects')[0]
+                matches = [item for item in obj['eventList'] if item['eventType'] == 4
+                           and (item.get('collisionObjectId') or {}).get('path') == target['path']]
+                path = f'objects/{name}/Collision_{collision}.gml'
+            else:
+                matches = [item for item in obj['eventList']
+                           if item['eventType'] == typ and item['eventNum'] == num]
+                path = f'objects/{name}/{stem}_{num}.gml'
+            if not matches:
+                raise ValueError('事件不存在')
+            if len(matches) != 1:
+                raise ValueError('事件不唯一，拒绝删除')
+            if matches[0].get('isDnD'):
+                raise ValueError('不删除 GML Visual 事件')
+            if edit.raw(path) is None:
+                raise ValueError('事件文件缺失：' + path)
+            obj['eventList'].remove(matches[0])
+            edit.save(ref['path'], obj)
+            edit.changes[path] = None
+            result = edit.commit(dry_run)
+            result.update({'object_name': name, 'event': event, 'number': number,
+                           'collision_object': collision, 'deleted_file': path})
+            return result
 
     def create_room(self, name, width=1366, height=768, group='房间', dry_run=False):
         if not 1 <= width <= 32768 or not 1 <= height <= 32768:
@@ -786,32 +1028,158 @@ class Project(Storage):
                 edit.save(ref['path'], data)
             return edit.commit(dry_run)
 
-    def import_sound(self, name, wav_path, group='声音', volume=1.0, dry_run=False):
+    @staticmethod
+    def _ogg_info(raw):
+        """读取 Ogg Vorbis 头、声道、采样率和末页 granule 时长；不依赖外部解码器。"""
+        if len(raw) < 28 or raw[:4] != b'OggS':
+            raise ValueError('不是有效的 Ogg 文件')
+        pos, page, last_granule, eos, first_packet = 0, 0, 0, False, None
+        while pos < len(raw):
+            if pos + 27 > len(raw) or raw[pos:pos + 4] != b'OggS':
+                raise ValueError('Ogg 页头损坏')
+            header_type = raw[pos + 5]
+            granule = int.from_bytes(raw[pos + 6:pos + 14], 'little')
+            count = raw[pos + 26]
+            table_end = pos + 27 + count
+            if table_end > len(raw):
+                raise ValueError('Ogg 页段表截断')
+            segments = raw[pos + 27:table_end]
+            body_len = sum(segments)
+            body_start = table_end
+            body_end = body_start + body_len
+            if body_end > len(raw):
+                raise ValueError('Ogg 页数据截断')
+            if page == 0:
+                if not header_type & 0x02:
+                    raise ValueError('Ogg 首页缺少 BOS 标志')
+                packet_len = 0
+                for segment in segments:
+                    packet_len += segment
+                    if segment < 255:
+                        break
+                if not 0 < packet_len <= body_len:
+                    raise ValueError('Ogg 标识头截断')
+                first_packet = raw[body_start:body_start + packet_len]
+            if granule != 0xFFFFFFFFFFFFFFFF:
+                last_granule = granule
+            if header_type & 0x04:
+                eos = True
+            pos, page = body_end, page + 1
+        if pos != len(raw):
+            raise ValueError('Ogg 文件包含页外数据')
+        if first_packet is None or len(first_packet) < 30 or first_packet[:7] != b'\x01vorbis':
+            raise ValueError('不是 Ogg Vorbis 音频')
+        if int.from_bytes(first_packet[7:11], 'little') != 0:
+            raise ValueError('不支持的 Vorbis 版本')
+        channels = first_packet[11]
+        rate = int.from_bytes(first_packet[12:16], 'little')
+        nominal = int.from_bytes(first_packet[20:24], 'little', signed=True)
+        if channels not in (1, 2):
+            raise ValueError('OGG 必须为单声道或双声道')
+        if not 8000 <= rate <= 192000:
+            raise ValueError('OGG 采样率须为 8000～192000')
+        if last_granule <= 0:
+            raise ValueError('OGG 缺少有效音频时长')
+        duration = last_granule / rate
+        if not math.isfinite(duration) or duration <= 0 or duration > 24 * 3600:
+            raise ValueError('OGG 时长超出允许范围')
+        bit_rate = round(nominal / 1000) if nominal > 0 else round(len(raw) * 8 / duration / 1000)
+        return {'sample_rate': rate, 'channels': channels, 'duration': duration,
+                'bit_rate': max(1, min(512, bit_rate)), 'eos': eos}
+
+    def import_sound(self, name, audio_path, group='声音', volume=1.0, dry_run=False):
         name_check(name)
         finite(volume, '音量', 0)
         if volume > 1:
             raise ValueError('音量须为 0～1')
-        path = Path(wav_path).resolve(strict=True)
-        if path.suffix.lower() != '.wav' or path.stat().st_size > 128 * 1024 * 1024:
-            raise ValueError('本版支持不超过 128 MiB 的 PCM WAV')
+        path = Path(audio_path).resolve(strict=True)
+        suffix = path.suffix.lower()
+        if suffix not in ('.wav', '.ogg') or path.stat().st_size > 128 * 1024 * 1024:
+            raise ValueError('支持不超过 128 MiB 的 PCM WAV 或 OGG Vorbis')
         raw = path.read_bytes()
-        with wave.open(io.BytesIO(raw)) as sound:
-            rate, frames, channels, width = sound.getframerate(), sound.getnframes(), sound.getnchannels(), sound.getsampwidth()
-            if channels not in (1, 2) or width not in (1, 2, 3) or not frames:
-                raise ValueError('WAV 必须为非空单声道或双声道 8／16／24 位 PCM')
-            if len(sound.readframes(frames)) != frames * channels * width:
-                raise ValueError('WAV 数据截断')
-        data = schemas.typed('GMSound', 'v2', **{'%Name': name}, name=name,
-            audioGroupId={'name': 'audiogroup_default', 'path': 'audiogroups/audiogroup_default'},
-            bitDepth=1, channelFormat=0, compression=0, compressionQuality=4, conversionMode=0,
-            duration=frames/rate, exportDir='', preload=False, sampleRate=rate, soundFile=name+'.wav', volume=volume)
+        if suffix == '.wav':
+            with wave.open(io.BytesIO(raw)) as sound:
+                rate, frames = sound.getframerate(), sound.getnframes()
+                channels, width = sound.getnchannels(), sound.getsampwidth()
+                if channels not in (1, 2) or width not in (1, 2, 3) or not frames:
+                    raise ValueError('WAV 必须为非空单声道或双声道 8／16／24 位 PCM')
+                if len(sound.readframes(frames)) != frames * channels * width:
+                    raise ValueError('WAV 数据截断')
+            info = {'sample_rate': rate, 'channels': channels,
+                    'duration': frames / rate, 'bit_rate': 128}
+        else:
+            info = self._ogg_info(raw)
+        # 与 GameMaker 2026 原生 GMSound v2 的字段顺序一致；不要写已移除的 bitRate/type。
+        data = {
+            '$GMSound': 'v2',
+            '%Name': name,
+            'audioGroupId': {'name': 'audiogroup_default',
+                             'path': 'audiogroups/audiogroup_default'},
+            'bitDepth': 1,
+            'channelFormat': info['channels'] - 1,
+            'compression': 0,
+            'compressionQuality': 4,
+            'conversionMode': 0,
+            'duration': info['duration'],
+            'exportDir': '',
+            'name': name,
+            'parent': None,
+            'preload': False,
+            'resourceType': 'GMSound',
+            'resourceVersion': '2.0',
+            'sampleRate': info['sample_rate'],
+            'soundFile': name + suffix,
+            'volume': volume,
+        }
         with self.lock:
             edit = Edit(self)
             if not any(g['name'] == 'audiogroup_default' for g in edit.load(self.yyp.name).get('AudioGroups', [])):
                 raise ValueError('项目缺少默认音频组')
             self._register(edit, 'sounds', name, data, group)
-            edit.new(f'sounds/{name}/{name}.wav', raw)
-            return edit.commit(dry_run)
+            edit.new(f'sounds/{name}/{name}{suffix}', raw)
+            result = edit.commit(dry_run)
+            result.update({'format': suffix[1:], 'sample_rate': info['sample_rate'],
+                           'channels': info['channels'], 'duration': info['duration'],
+                           'sha256': digest(raw)})
+            return result
+
+    def import_font(self, name, font_path, dry_run=False):
+        """把字体文件作为 IncludedFile 放入 datafiles/fonts；不生成烘焙 GMFont。"""
+        name_check(name)
+        path = Path(font_path).resolve(strict=True)
+        suffix = path.suffix.lower()
+        if suffix not in ('.ttf', '.tte', '.otf', '.ttc') or path.stat().st_size > 64 * 1024 * 1024:
+            raise ValueError('支持不超过 64 MiB 的 TTF/TTE/OTF/TTC 字体')
+        raw = path.read_bytes()
+        signature = raw[:4]
+        if signature == b'ttcf':
+            if len(raw) < 16 or int.from_bytes(raw[8:12], 'big') < 1:
+                raise ValueError('TTC 字体头损坏')
+        elif signature not in (b'\x00\x01\x00\x00', b'OTTO', b'true', b'typ1'):
+            raise ValueError('字体文件签名不受支持')
+        file_name = name + suffix
+        relative = f'datafiles/fonts/{file_name}'
+        with self.lock:
+            edit = Edit(self)
+            project = edit.load(self.yyp.name)
+            included = project.setdefault('IncludedFiles', [])
+            if any(item.get('name', '').casefold() == file_name.casefold()
+                   for item in included):
+                raise ValueError('字体文件已存在；不会覆盖')
+            if self.path(relative).exists():
+                raise ValueError('目标字体文件已存在；不会覆盖')
+            included.append({'$GMIncludedFile': '', '%Name': file_name, 'CopyToMask': -1,
+                             'filePath': 'datafiles/fonts', 'name': file_name,
+                             'resourceType': 'GMIncludedFile', 'resourceVersion': '2.0'})
+            included.sort(key=lambda item: (item.get('filePath', ''), item.get('name', '')))
+            edit.save(self.yyp.name, project)
+            edit.new(relative, raw)
+            result = edit.commit(dry_run)
+            runtime_path = 'fonts/' + file_name
+            result.update({'file_name': file_name, 'project_path': relative,
+                           'runtime_path': runtime_path, 'sha256': digest(raw),
+                           'usage': f'font_add("{runtime_path}", 16, 0, 0, 0, 65535)'})
+            return result
 
     def create_shader(self, name, vertex_code, fragment_code, group='着色器', dry_run=False):
         with self.lock:

@@ -2,6 +2,7 @@
 import asyncio
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -236,7 +237,44 @@ class RuntimeTests(ProjectFixture):
         with self.assertRaises(ValueError):
             self.runtime.inspect(self.session_id, variables=['hp; game_end()'])
         self.respond(command='input')
-        self.runtime.input(self.session_id, ['right'], frames=3, dry_run=False)
+        self.runtime.input(self.session_id, ['right'], frames=3, dry_run=False,
+                           mode='state')
+        with self.assertRaises(ValueError):
+            self.runtime.input(self.session_id, ['right'], mode='physical')
+
+    def test_input_message_mode_posts_and_releases_keys(self):
+        self.launch()
+        self.ready()
+        window = type('FakeWindow', (), {'handle': 1, 'pid': 2,
+                                         'title': 'MORX_Run_x',
+                                         'width': 640, 'height': 360})()
+        with patch('morx_gms2_mcp.win_mouse.find_game_window', return_value=window), \
+             patch('morx_gms2_mcp.win_keyboard.key_down') as down, \
+             patch('morx_gms2_mcp.win_keyboard.key_up') as up, \
+             patch.object(self.runtime, 'wait',
+                          return_value={'data': {'frames': 3}, 'frame': 7}) as wait:
+            result = self.runtime.input(self.session_id, ['e', 'right'], frames=3,
+                                        dry_run=False)
+        down.assert_called_once_with(window, [69, 39])
+        up.assert_called_once_with(window, [69, 39])
+        wait.assert_called_once_with(self.session_id, 3)
+        self.assertEqual(result['mode'], 'message')
+        self.assertEqual(result['frame'], 7)
+
+    def test_input_message_mode_releases_keys_after_wait_failure(self):
+        self.launch()
+        self.ready()
+        window = type('FakeWindow', (), {'handle': 1, 'pid': 2,
+                                         'title': 'MORX_Run_x',
+                                         'width': 640, 'height': 360})()
+        with patch('morx_gms2_mcp.win_mouse.find_game_window', return_value=window), \
+             patch('morx_gms2_mcp.win_keyboard.key_down') as down, \
+             patch('morx_gms2_mcp.win_keyboard.key_up') as up, \
+             patch.object(self.runtime, 'wait', side_effect=ValueError('timeout')):
+            with self.assertRaisesRegex(ValueError, 'timeout'):
+                self.runtime.input(self.session_id, ['e'], frames=3, dry_run=False)
+        down.assert_called_once()
+        up.assert_called_once()
 
     def test_stop_preview_and_owned_process_only(self):
         self.launch()
@@ -304,6 +342,32 @@ class RuntimeTests(ProjectFixture):
         path.parent.mkdir(parents=True)
         atomic_json(path, {'ok': True})
         self.assertEqual(bounded_json(path), {'ok': True})
+
+    def test_atomic_json_retries_transient_replace_error(self):
+        path = self.root / 'retry.json'
+        real_replace = os.replace
+        attempts = []
+
+        def flaky(source, target):
+            attempts.append(target)
+            if len(attempts) < 3:
+                raise PermissionError(13, 'file is in use', str(target))
+            return real_replace(source, target)
+
+        with patch('morx_gms2_mcp.storage.os.replace', side_effect=flaky):
+            atomic_json(path, {'ok': True})
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(bounded_json(path), {'ok': True})
+        self.assertFalse(any(path.parent.glob('retry.json.*.tmp')))
+
+    def test_atomic_json_reports_persistent_replace_error(self):
+        path = self.root / 'locked.json'
+        with patch('morx_gms2_mcp.storage.os.replace',
+                   side_effect=PermissionError(13, 'file is in use')):
+            with self.assertRaises(PermissionError):
+                atomic_json(path, {'ok': True})
+        self.assertFalse(path.exists())
+        self.assertFalse(any(path.parent.glob('locked.json.*.tmp')))
 
     def test_bridge_repair_after_line_ending_change_and_start_room_move(self):
         self.project.install_runtime_bridge(dry_run=False)
@@ -423,7 +487,7 @@ class RuntimeTests(ProjectFixture):
     def test_sequence_preview_validation_and_execution(self):
         self.launch()
         self.ready()
-        steps = [{'action': 'input', 'keys': ['right'], 'frames': 3},
+        steps = [{'action': 'input', 'keys': ['right'], 'frames': 3, 'mode': 'state'},
                  {'action': 'event', 'object_name': 'obj_probe', 'event': 'KeyPress',
                   'key': 'e'},
                  {'action': 'wait', 'frames': 2},
@@ -445,6 +509,7 @@ class RuntimeTests(ProjectFixture):
                     [{'action': 'capture'}] * 5,
                     [{'action': 'wait', 'frames': 600}] * 4,
                     [{'action': 'input', 'keys': ['win']}],
+                    [{'action': 'input', 'keys': ['right'], 'mode': 'physical'}],
                     [{'action': 'event', 'object_name': 'obj_probe', 'event': 'Draw'}]):
             with self.assertRaises(ValueError):
                 self.runtime.run_sequence(self.session_id, bad)
@@ -509,6 +574,142 @@ class RuntimeTests(ProjectFixture):
         with self.assertRaisesRegex(ValueError, 'Object not found'):
             self.runtime.inspect(self.session_id, object_name='obj_missing')
 
+    def test_inspect_globals_and_instance_arguments(self):
+        with patch.object(self.runtime, 'request', return_value={'data': {}}) as request:
+            self.runtime.inspect('session', scope='globals',
+                                 variables=['score', 'inventory'])
+        self.assertEqual(request.call_args.args[2], {
+            'object_name': '', 'variables': ['score', 'inventory'],
+            'limit': 1, 'scope': 'globals'})
+        for value in (100002, '100002', '@ref instance(100002)', 'instance(100002)'):
+            with patch.object(self.runtime, 'request', return_value={'data': {}}) as request:
+                self.runtime.inspect('session', object_name='obj_player', instance_id=value)
+            self.assertEqual(request.call_args.args[2]['instance_id'], 100002)
+            self.assertEqual(request.call_args.args[2]['scope'], 'instances')
+        for arguments in ({'scope': 'globals'},
+                          {'scope': 'globals', 'variables': ['score'], 'object_name': 'obj_x'},
+                          {'scope': 'globals', 'variables': ['score'], 'instance_id': 1},
+                          {'scope': 'other'}, {'instance_id': 0}):
+            with self.assertRaises(ValueError):
+                self.runtime.inspect('session', **arguments)
+
+    def test_sequence_state_supports_globals_and_instance_id(self):
+        step = self.runtime._sequence_step({
+            'action': 'state', 'scope': 'globals', 'variables': ['score']})
+        self.assertEqual(step, {'action': 'state', 'object_name': '',
+            'variables': ['score'], 'limit': 1, 'scope': 'globals'})
+        step = self.runtime._sequence_step({
+            'action': 'state', 'object_name': 'obj_player', 'instance_id': 100002})
+        self.assertEqual(step['instance_id'], 100002)
+        with self.assertRaises(ValueError):
+            self.runtime._sequence_step({
+                'action': 'state', 'scope': 'globals', 'variables': ['score'],
+                'object_name': 'obj_player'})
+
+    def test_set_variables_preview_validation_and_dispatch(self):
+        self.launch()
+        self.ready()
+        preview = self.runtime.set_variables(self.session_id, {'hp': 5, 'state': {'a': [1, True]}},
+                                             object_name='obj_probe', create_missing=True)
+        self.assertTrue(preview['dry_run'])
+        self.assertEqual(preview['scope'], 'instances')
+        self.assertFalse(self.runtime._file('request.json').exists())
+        globals_preview = self.runtime.set_variables(self.session_id, {'score': 7},
+                                                     scope='globals')
+        self.assertEqual(globals_preview['limit'], 1)
+        with patch.object(self.runtime, 'request', return_value={'data': {'count': 1}}) as request:
+            result = self.runtime.set_variables(self.session_id, {'hp': 5},
+                                                object_name='obj_probe', dry_run=False)
+        self.assertEqual(result['data']['count'], 1)
+        args = request.call_args.args[2]
+        self.assertEqual(args['values'], {'hp': 5})
+        self.assertEqual(args['object_name'], 'obj_probe')
+        self.assertFalse(args['create_missing'])
+        for arguments in (
+                {'values': {'hp': 1}},
+                {'values': {}},
+                {'values': {'hp': None}, 'object_name': 'obj_probe'},
+                {'values': {'hp': float('nan')}, 'object_name': 'obj_probe'},
+                {'values': {'a' * 65: 1}, 'object_name': 'obj_probe'},
+                {'values': {'v': [[[[[1]]]]]}, 'object_name': 'obj_probe'},
+                {'values': {'v': 'x' * 4097}, 'object_name': 'obj_probe'},
+                {'values': {'hp': 1}, 'scope': 'globals', 'object_name': 'obj_probe'},
+                {'values': {'hp': 1}, 'object_name': 'sys_morx_runtime'},
+                {'values': {'hp': 1}, 'object_name': 'obj_probe', 'instance_id': 0},
+                {'values': {'hp': 1}, 'object_name': 'obj_probe', 'create_missing': 'yes'}):
+            with self.assertRaises(ValueError):
+                self.runtime.set_variables(self.session_id, dry_run=False, **arguments)
+
+    def test_spawn_and_destroy_preview_validation_and_dispatch(self):
+        self.launch()
+        self.ready()
+        preview = self.runtime.spawn(self.session_id, 'obj_probe', 10, 20,
+                                     layer_name='Instances')
+        self.assertTrue(preview['dry_run'])
+        self.assertEqual(preview['layer_name'], 'Instances')
+        self.assertFalse(self.runtime._file('request.json').exists())
+        with patch.object(self.runtime, 'request', return_value={'data': {'instance': {}}}) as request:
+            self.runtime.spawn(self.session_id, 'obj_probe', 1, 2, depth=-5, dry_run=False)
+        self.assertEqual(request.call_args.args[1], 'spawn')
+        self.assertEqual(request.call_args.args[2]['depth'], -5)
+        preview = self.runtime.destroy(self.session_id, 'obj_probe', limit=3)
+        self.assertEqual(preview['limit'], 3)
+        preview = self.runtime.destroy(self.session_id, instance_id='@ref instance(100002)')
+        self.assertEqual(preview['instance_id'], 100002)
+        with patch.object(self.runtime, 'request', return_value={'data': {'count': 1}}) as request:
+            self.runtime.destroy(self.session_id, 'obj_probe', dry_run=False)
+        self.assertEqual(request.call_args.args[1], 'destroy')
+        for arguments in (
+                {'object_name': 'bad name'},
+                {'object_name': 'obj_probe', 'x': float('inf')},
+                {'object_name': 'obj_probe', 'layer_name': 1},
+                {'object_name': 'obj_probe', 'depth': True},
+                {'object_name': 'sys_morx_runtime'}):
+            with self.assertRaises(ValueError):
+                self.runtime.spawn(self.session_id, dry_run=False, **arguments)
+        for arguments in ({}, {'object_name': 'obj_probe', 'limit': 0},
+                          {'object_name': 'sys_morx_runtime'},
+                          {'instance_id': 'bad'}):
+            with self.assertRaises(ValueError):
+                self.runtime.destroy(self.session_id, dry_run=False, **arguments)
+
+    def test_sequence_set_spawn_destroy(self):
+        self.launch()
+        self.ready()
+        steps = [
+            {'action': 'set', 'values': {'hp': 1}, 'object_name': 'obj_probe'},
+            {'action': 'spawn', 'object_name': 'obj_probe', 'x': 1, 'y': 2},
+            {'action': 'destroy', 'object_name': 'obj_probe', 'limit': 2},
+        ]
+        preview = self.runtime.run_sequence(self.session_id, steps)
+        self.assertTrue(preview['dry_run'])
+        self.assertEqual([step['action'] for step in preview['steps']],
+                         ['set', 'spawn', 'destroy'])
+        self.assertEqual(preview['steps'][0]['values'], {'hp': 1})
+        for bad in ([{'action': 'set', 'values': {'hp': 1}}],
+                    [{'action': 'spawn', 'object_name': 'sys_morx_runtime'}],
+                    [{'action': 'destroy'}]):
+            with self.assertRaises(ValueError):
+                self.runtime.run_sequence(self.session_id, bad)
+        seen = self.sequence_responder(['set', 'spawn', 'destroy'])
+        result = self.runtime.run_sequence(self.session_id, steps, dry_run=False)
+        self.assertTrue(result['ok'])
+        self.assertEqual(seen, ['set', 'spawn', 'destroy'])
+        self.assertEqual([item['action'] for item in result['results']],
+                         ['set', 'spawn', 'destroy'])
+
+    def test_bridge_serializes_globals_arrays_and_structs_with_bounds(self):
+        bridge = ''.join(sources('a' * 32).values())
+        for marker in ('variable_global_exists', 'variable_global_get',
+                       'variable_struct_get_names', '_budget.left', '_depth >= 3',
+                       'min(array_length_value,32)', 'min(struct_length_value,32)',
+                       '{left:64}', 'variable_global_set', 'variable_instance_set',
+                       'variable_clone', 'instance_create_layer', 'instance_create_depth',
+                       'instance_destroy',
+                       'mcp_collect_targets', 'case "set"', 'case "spawn"', 'case "destroy"'):
+            self.assertIn(marker, bridge)
+        self.assertIn('scope == "globals"', bridge)
+
     def test_run_copy_is_outside_project_and_stop_cleans_up(self):
         result = self.launch()
         snapshot = Path(result['snapshot_project'])
@@ -546,7 +747,7 @@ class RuntimeTests(ProjectFixture):
             server = build_server(self.root, runtime_options=self.options)
         async def verify():
             tools = await server.list_tools()
-            self.assertEqual(len(tools), 44)
+            self.assertEqual(len(tools), 51)
             for tool in tools:
                 if not tool.annotations.readOnlyHint:
                     self.assertTrue(tool.inputSchema['properties']['dry_run']['default'])

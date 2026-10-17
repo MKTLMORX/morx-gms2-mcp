@@ -23,6 +23,132 @@ class OperationTests(ProjectFixture):
         self.assertEqual(self.project.inspect_resource('scr_test')['resource']['parent']['path'], 'folders/脚本/game.yy')
         self.assertTrue(self.project.validate()['ok'], self.project.validate())
 
+    def test_delete_resource_preview_execute_and_restore(self):
+        self.project.create('scripts', 'scr_delete', 'function scr_delete() { return 1; }')
+        preview = self.project.delete_resource('scr_delete')
+        self.assertTrue(preview['dry_run'])
+        self.assertIn('scripts/scr_delete/scr_delete.gml', preview['deleted_files'])
+        self.assertTrue((self.root / 'scripts/scr_delete/scr_delete.gml').exists())
+        result = self.project.delete_resource('scr_delete', dry_run=False)
+        self.assertFalse((self.root / 'scripts/scr_delete').exists())
+        names = [entry['id']['name'] for entry in self.project.metadata()['resources']]
+        self.assertNotIn('scr_delete', names)
+        self.assertTrue(self.project.validate()['ok'])
+        self.project.restore(result['transaction'], dry_run=False)
+        self.assertTrue((self.root / 'scripts/scr_delete/scr_delete.gml').exists())
+
+    def test_delete_referenced_resource_and_last_room_are_rejected(self):
+        self.project.create('objects', 'obj_delete_ref')
+        self.project.place('obj_delete_ref', 'Room1', 'Instances', 'inst_delete_ref', 0, 0)
+        with self.assertRaisesRegex(ValueError, '仍被引用'):
+            self.project.delete_resource('obj_delete_ref', dry_run=False)
+        with self.assertRaisesRegex(ValueError, '最后一个房间'):
+            self.project.delete_resource('Room1', dry_run=False)
+
+    def test_delete_sprite_removes_frame_files_and_restores(self):
+        png = self.root / 'delete.png'
+        Image.new('RGBA', (2, 2), (1, 2, 3, 4)).save(png)
+        self.project.import_sprite('spr_delete', [str(png)])
+        preview = self.project.delete_resource('spr_delete')
+        self.assertTrue(any(path.endswith('.png') for path in preview['deleted_files']))
+        result = self.project.delete_resource('spr_delete', dry_run=False)
+        self.assertFalse((self.root / 'sprites/spr_delete').exists())
+        self.assertTrue(self.project.validate()['ok'])
+        self.project.restore(result['transaction'], dry_run=False)
+        self.assertTrue((self.root / 'sprites/spr_delete/spr_delete.yy').exists())
+
+    def test_rename_script_updates_registration_and_restores(self):
+        self.project.create('scripts', 'scr_old', 'function scr_old() { return 1; }')
+        preview = self.project.rename_resource('scr_old', 'scr_new')
+        self.assertTrue(preview['dry_run'])
+        self.assertTrue((self.root / 'scripts/scr_old/scr_old.gml').exists())
+        self.assertFalse((self.root / 'scripts/scr_new').exists())
+        result = self.project.rename_resource('scr_old', 'scr_new', dry_run=False)
+        self.assertTrue((self.root / 'scripts/scr_new/scr_new.gml').exists())
+        self.assertFalse((self.root / 'scripts/scr_old').exists())
+        resources = [entry['id'] for entry in self.project.metadata()['resources']]
+        self.assertIn({'name': 'scr_new', 'path': 'scripts/scr_new/scr_new.yy'}, resources)
+        order = self.project.read('test.resource_order')
+        self.assertIn('scripts/scr_new/scr_new.yy',
+                      [item['path'] for item in order['ResourceOrderSettings']])
+        self.assertTrue(self.project.validate()['ok'])
+        self.project.restore(result['transaction'], dry_run=False)
+        self.assertTrue((self.root / 'scripts/scr_old/scr_old.gml').exists())
+        self.assertFalse((self.root / 'scripts/scr_new').exists())
+
+    def test_rename_sound_updates_file_and_soundfile_field(self):
+        wav = self.root / 'probe.wav'
+        with wave.open(str(wav), 'wb') as sound:
+            sound.setnchannels(1)
+            sound.setsampwidth(2)
+            sound.setframerate(44100)
+            sound.writeframes(b'\0\0' * 100)
+        self.project.import_sound('snd_old', str(wav))
+        self.project.rename_resource('snd_old', 'snd_new', dry_run=False)
+        data = self.project.read('sounds/snd_new/snd_new.yy')
+        self.assertEqual(data['soundFile'], 'snd_new.wav')
+        self.assertTrue((self.root / 'sounds/snd_new/snd_new.wav').exists())
+        self.assertFalse((self.root / 'sounds/snd_old').exists())
+        self.assertTrue(self.project.validate()['ok'])
+
+    def test_rename_sprite_updates_animation_and_resource_refs(self):
+        png = self.root / 'sprite.png'
+        Image.new('RGBA', (2, 2), (10, 20, 30, 255)).save(png)
+        self.project.import_sprite('spr_old', [str(png)])
+        self.project.create('objects', 'obj_sprite_user')
+        self.project.configure_object('obj_sprite_user', sprite='spr_old')
+        self.project.create_tileset('ts_old', 'spr_old', 1, 1)
+        self.project.rename_resource('spr_old', 'spr_new', dry_run=False)
+        sprite = self.project.read('sprites/spr_new/spr_new.yy')
+        for track in sprite['sequence']['tracks']:
+            if track.get('resourceType') == 'GMSpriteFramesTrack':
+                for key in track['keyframes']['Keyframes']:
+                    for channel in key['Channels'].values():
+                        self.assertEqual(channel['Id']['path'], 'sprites/spr_new/spr_new.yy')
+        obj = self.project.read('objects/obj_sprite_user/obj_sprite_user.yy')
+        self.assertEqual(obj['spriteId']['name'], 'spr_new')
+        self.assertEqual(obj['spriteId']['path'], 'sprites/spr_new/spr_new.yy')
+        tileset = self.project.read('tilesets/ts_old/ts_old.yy')
+        self.assertEqual(tileset['spriteId']['path'], 'sprites/spr_new/spr_new.yy')
+        self.assertTrue(self.project.validate()['ok'], self.project.validate())
+
+    def test_rename_object_updates_room_parent_and_collision_refs(self):
+        self.project.create('objects', 'obj_parent')
+        self.project.create('objects', 'obj_child')
+        self.project.create('objects', 'obj_target')
+        self.project.configure_object('obj_child', parent='obj_parent')
+        self.project.add_event('obj_child', 'Collision', 'hits = 0;',
+                               collision_object='obj_target')
+        self.project.place('obj_parent', 'Room1', 'Instances', 'inst_parent', 0, 0)
+        preview = self.project.rename_resource('obj_target', 'obj_bullet')
+        self.assertEqual(preview['collision_files'][0]['to'],
+                         'objects/obj_child/Collision_obj_bullet.gml')
+        self.project.rename_resource('obj_target', 'obj_bullet', dry_run=False)
+        child = self.project.read('objects/obj_child/obj_child.yy')
+        self.assertEqual(child['eventList'][0]['collisionObjectId']['name'], 'obj_bullet')
+        self.assertTrue((self.root / 'objects/obj_child/Collision_obj_bullet.gml').exists())
+        self.assertFalse((self.root / 'objects/obj_child/Collision_obj_target.gml').exists())
+        self.project.rename_resource('obj_parent', 'obj_root', dry_run=False)
+        child = self.project.read('objects/obj_child/obj_child.yy')
+        self.assertEqual(child['parentObjectId']['name'], 'obj_root')
+        room = self.project.read('rooms/Room1/Room1.yy')
+        self.assertEqual(room['layers'][0]['instances'][0]['objectId']['name'], 'obj_root')
+        self.assertTrue(self.project.validate()['ok'])
+
+    def test_delete_and_rename_reject_stale_hash(self):
+        self.project.create('scripts', 'scr_hash')
+        with self.assertRaises(ValueError):
+            self.project.delete_resource('scr_hash', '0' * 64, dry_run=False)
+        with self.assertRaises(ValueError):
+            self.project.rename_resource('scr_hash', 'scr_hash_new', '0' * 64, dry_run=False)
+
+    def test_managed_bridge_cannot_be_deleted_or_renamed(self):
+        self.project.create('objects', 'sys_morx_runtime')
+        with self.assertRaisesRegex(ValueError, '桥接'):
+            self.project.delete_resource('sys_morx_runtime', dry_run=False)
+        with self.assertRaisesRegex(ValueError, '桥接'):
+            self.project.rename_resource('sys_morx_runtime', 'sys_other', dry_run=False)
+
     def test_group_idempotence_and_invalid_names(self):
         self.project.ensure_group('物体/ui')
         self.assertEqual(self.project.ensure_group('物体/ui')['changed'], [])
@@ -203,6 +329,83 @@ class OperationTests(ProjectFixture):
         with self.assertRaises(ValueError):
             self.project.create_tileset('ts_bad', 'spr_tiles', 12, 16)
         self.assertTrue(self.project.validate()['ok'], self.project.validate())
+
+    def test_remove_object_event_preview_execute_and_restore(self):
+        self.project.create('objects', 'obj_remove')
+        self.project.create('objects', 'obj_remove_target')
+        self.project.add_event('obj_remove', 'Step', '// step')
+        self.project.add_event('obj_remove', 'Collision', '// hit',
+                               collision_object='obj_remove_target')
+        preview = self.project.remove_event('obj_remove', 'Step')
+        self.assertTrue(preview['dry_run'])
+        self.assertEqual(preview['deleted_file'], 'objects/obj_remove/Step_0.gml')
+        self.assertTrue((self.root / 'objects/obj_remove/Step_0.gml').exists())
+        result = self.project.remove_event('obj_remove', 'Step', dry_run=False)
+        self.assertFalse((self.root / 'objects/obj_remove/Step_0.gml').exists())
+        obj = self.project.read('objects/obj_remove/obj_remove.yy')
+        self.assertFalse(any(event['eventType'] == 3 for event in obj['eventList']))
+        collision = self.project.remove_event(
+            'obj_remove', 'Collision', collision_object='obj_remove_target', dry_run=False)
+        self.assertFalse((self.root / 'objects/obj_remove/Collision_obj_remove_target.gml').exists())
+        with self.assertRaisesRegex(ValueError, '不存在'):
+            self.project.remove_event('obj_remove', 'Step', dry_run=False)
+        self.project.restore(collision['transaction'], dry_run=False)
+        self.assertTrue((self.root / 'objects/obj_remove/Collision_obj_remove_target.gml').exists())
+        self.project.restore(result['transaction'], dry_run=False)
+        self.assertTrue((self.root / 'objects/obj_remove/Step_0.gml').exists())
+        self.assertTrue(self.project.validate()['ok'], self.project.validate())
+
+    def test_ogg_and_font_import(self):
+        def page(flags, granule, body, sequence):
+            return (b'OggS' + b'\0' + bytes([flags]) + granule.to_bytes(8, 'little') +
+                    (1).to_bytes(4, 'little') + sequence.to_bytes(4, 'little') +
+                    b'\0\0\0\0' + bytes([1, len(body)]) + body)
+        ident = (b'\x01vorbis' + (0).to_bytes(4, 'little') + bytes([2]) +
+                 (44100).to_bytes(4, 'little') + (0).to_bytes(4, 'little') +
+                 (128000).to_bytes(4, 'little') + (0).to_bytes(4, 'little') +
+                 bytes([0xB8, 1]))
+        ogg = page(0x02, 0, ident, 0) + page(0x04, 88200, b'\0', 1)
+        path = self.root / 'tone.ogg'
+        path.write_bytes(ogg)
+        preview = self.project.import_sound('sfx_ogg', str(path), dry_run=True)
+        self.assertTrue(preview['dry_run'])
+        self.assertFalse((self.root / 'sounds/sfx_ogg').exists())
+        result = self.project.import_sound('sfx_ogg', str(path), dry_run=False)
+        self.assertEqual(result['format'], 'ogg')
+        data = self.project.read('sounds/sfx_ogg/sfx_ogg.yy')
+        self.assertEqual(data['soundFile'], 'sfx_ogg.ogg')
+        self.assertEqual(data['sampleRate'], 44100)
+        self.assertEqual(data['channelFormat'], 1)
+        self.assertAlmostEqual(data['duration'], 2.0)
+        self.assertEqual((self.root / 'sounds/sfx_ogg/sfx_ogg.ogg').read_bytes(), ogg)
+        self.assertTrue(self.project.validate()['ok'])
+        self.project.rename_resource('sfx_ogg', 'sfx_ogg_new', dry_run=False)
+        self.assertEqual(self.project.read('sounds/sfx_ogg_new/sfx_ogg_new.yy')['soundFile'],
+                         'sfx_ogg_new.ogg')
+        self.assertTrue((self.root / 'sounds/sfx_ogg_new/sfx_ogg_new.ogg').exists())
+
+        font_path = self.root / 'font.ttf'
+        font_path.write_bytes(b'\x00\x01\x00\x00' + b'\0' * 100)
+        preview = self.project.import_font('font_ui', str(font_path), dry_run=True)
+        self.assertTrue(preview['dry_run'])
+        self.assertFalse((self.root / 'datafiles/fonts/font_ui.ttf').exists())
+        result = self.project.import_font('font_ui', str(font_path), dry_run=False)
+        self.assertEqual(result['runtime_path'], 'fonts/font_ui.ttf')
+        self.assertIn('font_add', result['usage'])
+        self.assertEqual((self.root / 'datafiles/fonts/font_ui.ttf').read_bytes(),
+                         font_path.read_bytes())
+        included = self.project.metadata()['IncludedFiles']
+        self.assertIn('font_ui.ttf', [item['name'] for item in included])
+        with self.assertRaisesRegex(ValueError, '已存在'):
+            self.project.import_font('font_ui', str(font_path), dry_run=False)
+        bad = self.root / 'bad.ogg'
+        bad.write_bytes(b'not ogg')
+        with self.assertRaises(ValueError):
+            self.project.import_sound('sfx_bad_ogg', str(bad), dry_run=False)
+        bad_font = self.root / 'bad.ttf'
+        bad_font.write_bytes(b'not a font')
+        with self.assertRaisesRegex(ValueError, '签名'):
+            self.project.import_font('font_bad', str(bad_font), dry_run=False)
 
     def test_png_wav_shader_resources(self):
         paths = []

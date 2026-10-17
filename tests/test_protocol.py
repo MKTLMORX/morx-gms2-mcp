@@ -37,9 +37,11 @@ class ProtocolTests(ProjectFixture):
                     init = await session.initialize()
                     self.assertEqual(init.serverInfo.name, 'morx-gms2-mcp')
                     tools = (await session.list_tools()).tools
-                    self.assertEqual(len(tools), 44)
-                    self.assertTrue({'inspect_sprite', 'configure_sprite', 'set_sprite_animation'}
-                                    .issubset({tool.name for tool in tools}))
+                    self.assertEqual(len(tools), 51)
+                    self.assertTrue({'inspect_sprite', 'configure_sprite', 'set_sprite_animation',
+                                     'set_game_variables', 'spawn_game_instance',
+                                     'destroy_game_instance', 'remove_object_event',
+                                     'import_font'}.issubset({tool.name for tool in tools}))
                     for tool in tools:
                         self.assertIsNotNone(tool.annotations)
                         if not tool.annotations.readOnlyHint:

@@ -63,7 +63,9 @@ mcp_release = function() {
     for (var k=0;k<array_length(mcp_keys);k++) keyboard_key_release(mcp_keys[k]);
     mcp_keys = [];
 };
-mcp_value = function(_value) {
+mcp_value = function(_value,_depth,_budget) {
+    if (_budget.left <= 0) return {type:"truncated"};
+    _budget.left -= 1;
     if (is_undefined(_value)) return {type:"undefined"};
     if (is_bool(_value)) return _value;
     if (is_real(_value)) {
@@ -71,14 +73,82 @@ mcp_value = function(_value) {
         return _value;
     }
     if (is_string(_value)) return string_copy(_value,1,1024);
+    if (is_array(_value)) {
+        var array_length_value = array_length(_value);
+        if (_depth >= 3) return {type:"array",length:array_length_value,items:[],truncated:true};
+        var items = [];
+        var array_take = min(array_length_value,32);
+        for (var ai=0;ai<array_take;ai++) {
+            array_push(items,mcp_value(_value[ai],_depth+1,_budget));
+            if (_budget.left <= 0) break;
+        }
+        return {type:"array",length:array_length_value,items:items,
+            truncated:(array_length(items)<array_length_value || _budget.left<=0)};
+    }
+    if (is_struct(_value)) {
+        var names = variable_struct_get_names(_value);
+        var struct_length_value = array_length(names);
+        if (_depth >= 3) return {type:"struct",length:struct_length_value,values:{},truncated:true};
+        var values = {};
+        var struct_take = min(struct_length_value,32);
+        var struct_count = 0;
+        for (var si=0;si<struct_take;si++) {
+            var struct_field = names[si];
+            variable_struct_set(values,struct_field,
+                mcp_value(variable_struct_get(_value,struct_field),_depth+1,_budget));
+            struct_count += 1;
+            if (_budget.left <= 0) break;
+        }
+        return {type:"struct",length:struct_length_value,values:values,
+            truncated:(struct_count<struct_length_value || _budget.left<=0)};
+    }
     return {type:"complex"};
 };
 mcp_snapshot = function(_args) {
+    var scope = "instances";
+    if (variable_struct_exists(_args,"scope")) scope = _args.scope;
+    var base = {room:room_get_name(room),room_width:room_width,room_height:room_height,
+        window_width:window_get_width(),window_height:window_get_height(),
+        gui_width:display_get_gui_width(),gui_height:display_get_gui_height(),
+        frame:mcp_frame,fps:fps_real,scope:scope};
+    if (scope == "globals") {
+        var globals = {};
+        for (var gj=0;gj<array_length(_args.variables);gj++) {
+            var global_field = _args.variables[gj];
+            if (variable_global_exists(global_field)) {
+                variable_struct_set(globals,global_field,
+                    mcp_value(variable_global_get(global_field),0,{left:64}));
+            } else variable_struct_set(globals,global_field,{type:"missing"});
+        }
+        base.globals = globals;
+        base.truncated = false;
+        return base;
+    }
     var rows = [];
     var source = all;
     if (_args.object_name != "") {
         source = asset_get_index(_args.object_name);
         if (source == -1) return {error:"Object not found in running build"};
+    }
+    var single = variable_struct_exists(_args,"instance_id") && is_real(_args.instance_id);
+    if (single) {
+        var target_instance = _args.instance_id;
+        if (!instance_exists(target_instance)) return {error:"Instance not found in running build"};
+        if (_args.object_name != "" && target_instance.object_index != source) {
+            return {error:"Instance does not match object_name"};
+        }
+        var one_values = {};
+        for (var sj=0;sj<array_length(_args.variables);sj++) {
+            var one_field = _args.variables[sj];
+            if (variable_instance_exists(target_instance,one_field)) {
+                variable_struct_set(one_values,one_field,
+                    mcp_value(variable_instance_get(target_instance,one_field),0,{left:64}));
+            } else variable_struct_set(one_values,one_field,{type:"missing"});
+        }
+        base.instances = [{id:target_instance.id,
+            object_name:object_get_name(target_instance.object_index),values:one_values}];
+        base.truncated = false;
+        return base;
     }
     var total = instance_number(source);
     var visible_total = total;
@@ -90,16 +160,34 @@ mcp_snapshot = function(_args) {
         for (var j=0;j<array_length(_args.variables);j++) {
             var field = _args.variables[j];
             if (variable_instance_exists(inst,field)) {
-                variable_struct_set(values,field,mcp_value(variable_instance_get(inst,field)));
+                variable_struct_set(values,field,
+                    mcp_value(variable_instance_get(inst,field),0,{left:64}));
             } else variable_struct_set(values,field,{type:"missing"});
         }
         array_push(rows,{id:inst.id,object_name:object_get_name(inst.object_index),values:values});
     }
-    return {room:room_get_name(room),room_width:room_width,room_height:room_height,
-        window_width:window_get_width(),window_height:window_get_height(),
-        gui_width:display_get_gui_width(),gui_height:display_get_gui_height(),
-        frame:mcp_frame,fps:fps_real,instances:rows,truncated:visible_total>array_length(rows)};
+    base.instances = rows;
+    base.truncated = visible_total>array_length(rows);
+    return base;
 };
+mcp_collect_targets = function(_args,_source) {
+    var targets = [];
+    if (variable_struct_exists(_args,"instance_id")) {
+        var one = _args.instance_id;
+        if (!instance_exists(one)) return {error:"Instance not found in running build"};
+        if (_source != all && one.object_index != _source) {
+            return {error:"Instance does not match object_name"};
+        }
+        array_push(targets,one);
+        return {targets:targets};
+    }
+    if (_source == all) return {error:"object_name or instance_id required"};
+    var total = instance_number(_source);
+    var cap = min(total,_args.limit);
+    for (var i=0;i<cap;i++) array_push(targets,instance_find(_source,i));
+    return {targets:targets};
+};
+mcp_bridge_asset = asset_get_index("sys_morx_runtime");
 mcp_errors = [];
 mcp_text = function(_value,_limit) {
     if (is_undefined(_value)) return "";
@@ -160,6 +248,169 @@ try {
     switch (request.command) {
         case "state":
             mcp_reply(request.request,true,mcp_snapshot(request.args));
+            break;
+        case "set":
+            var set_scope = request.args.scope;
+            var set_values = request.args.values;
+            if (!is_struct(set_values)) {
+                mcp_reply(request.request,false,{error:"values must be a struct"}); break;
+            }
+            var set_names = variable_struct_get_names(set_values);
+            if (array_length(set_names)<1 || array_length(set_names)>16) {
+                mcp_reply(request.request,false,{error:"values must contain 1 to 16 variables"}); break;
+            }
+            var set_create = false;
+            if (variable_struct_exists(request.args,"create_missing")) set_create = request.args.create_missing;
+            if (set_scope == "globals") {
+                var set_global_error = "";
+                for (var sg=0;sg<array_length(set_names);sg++) {
+                    var set_gname = set_names[sg];
+                    if (set_gname == "id" || set_gname == "object_index") {
+                        set_global_error = "Protected variable: "+set_gname;
+                    } else if (!variable_global_exists(set_gname) && !set_create) {
+                        set_global_error = "Global variable not found: "+set_gname;
+                    }
+                    if (set_global_error != "") break;
+                }
+                if (set_global_error != "") {
+                    mcp_reply(request.request,false,{error:set_global_error}); break;
+                }
+                var set_global_previous = {};
+                var set_global_created = [];
+                for (var sw=0;sw<array_length(set_names);sw++) {
+                    var set_w_name = set_names[sw];
+                    if (variable_global_exists(set_w_name)) {
+                        variable_struct_set(set_global_previous,set_w_name,
+                            mcp_value(variable_global_get(set_w_name),0,{left:64}));
+                    } else {
+                        variable_struct_set(set_global_previous,set_w_name,{type:"missing"});
+                        array_push(set_global_created,set_w_name);
+                    }
+                    variable_global_set(set_w_name,
+                        variable_clone(variable_struct_get(set_values,set_w_name)));
+                }
+                mcp_reply(request.request,true,{scope:"globals",previous:set_global_previous,
+                    created:set_global_created,count:array_length(set_names),frame:mcp_frame});
+                break;
+            }
+            if (set_scope != "instances") {
+                mcp_reply(request.request,false,{error:"Invalid scope"}); break;
+            }
+            var set_source = all;
+            if (request.args.object_name != "") {
+                set_source = asset_get_index(request.args.object_name);
+                if (set_source == -1) {
+                    mcp_reply(request.request,false,{error:"Object not found in running build"}); break;
+                }
+                if (set_source == mcp_bridge_asset) {
+                    mcp_reply(request.request,false,{error:"Managed bridge cannot be modified"}); break;
+                }
+            }
+            var set_collected = mcp_collect_targets(request.args,set_source);
+            if (variable_struct_exists(set_collected,"error")) {
+                mcp_reply(request.request,false,{error:set_collected.error}); break;
+            }
+            var set_targets = set_collected.targets;
+            if (array_length(set_targets)<1) {
+                mcp_reply(request.request,false,{error:"No matching instances"}); break;
+            }
+            var set_target_error = "";
+            for (var st=0;st<array_length(set_targets);st++) {
+                var set_target = set_targets[st];
+                if (set_target == id || set_target.object_index == mcp_bridge_asset) {
+                    set_target_error = "Managed bridge cannot be modified";
+                    break;
+                }
+                for (var sn=0;sn<array_length(set_names);sn++) {
+                    var set_name = set_names[sn];
+                    if (set_name == "id" || set_name == "object_index") {
+                        set_target_error = "Protected variable: "+set_name;
+                    } else if (!variable_instance_exists(set_target,set_name) && !set_create) {
+                        set_target_error = "Instance variable not found: "+set_name;
+                    }
+                    if (set_target_error != "") break;
+                }
+                if (set_target_error != "") break;
+            }
+            if (set_target_error != "") {
+                mcp_reply(request.request,false,{error:set_target_error}); break;
+            }
+            var set_rows = [];
+            for (var sr=0;sr<array_length(set_targets);sr++) {
+                var set_row_target = set_targets[sr];
+                var set_previous = {};
+                for (var sv=0;sv<array_length(set_names);sv++) {
+                    var set_v_name = set_names[sv];
+                    if (variable_instance_exists(set_row_target,set_v_name)) {
+                        variable_struct_set(set_previous,set_v_name,
+                            mcp_value(variable_instance_get(set_row_target,set_v_name),0,{left:64}));
+                    } else variable_struct_set(set_previous,set_v_name,{type:"missing"});
+                    variable_instance_set(set_row_target,set_v_name,
+                        variable_clone(variable_struct_get(set_values,set_v_name)));
+                }
+                array_push(set_rows,{id:set_row_target.id,
+                    object_name:object_get_name(set_row_target.object_index),previous:set_previous});
+            }
+            mcp_reply(request.request,true,{scope:"instances",instances:set_rows,
+                count:array_length(set_names),frame:mcp_frame});
+            break;
+        case "spawn":
+            var spawn_source = asset_get_index(request.args.object_name);
+            if (spawn_source == -1) {
+                mcp_reply(request.request,false,{error:"Object not found in running build"}); break;
+            }
+            if (spawn_source == mcp_bridge_asset) {
+                mcp_reply(request.request,false,{error:"Managed bridge cannot be spawned"}); break;
+            }
+            var spawn_instance = noone;
+            if (request.args.layer_name != "") {
+                if (!layer_exists(request.args.layer_name)) {
+                    mcp_reply(request.request,false,{error:"Layer not found in running room"}); break;
+                }
+                spawn_instance = instance_create_layer(request.args.x,request.args.y,
+                    request.args.layer_name,spawn_source);
+            } else {
+                spawn_instance = instance_create_depth(request.args.x,request.args.y,
+                    request.args.depth,spawn_source);
+            }
+            if (!instance_exists(spawn_instance)) {
+                mcp_reply(request.request,false,{error:"Instance creation failed"}); break;
+            }
+            mcp_reply(request.request,true,{instance:{id:spawn_instance.id,
+                object_name:object_get_name(spawn_instance.object_index),
+                x:spawn_instance.x,y:spawn_instance.y},frame:mcp_frame});
+            break;
+        case "destroy":
+            var destroy_source = all;
+            if (request.args.object_name != "") {
+                destroy_source = asset_get_index(request.args.object_name);
+                if (destroy_source == -1) {
+                    mcp_reply(request.request,false,{error:"Object not found in running build"}); break;
+                }
+                if (destroy_source == mcp_bridge_asset) {
+                    mcp_reply(request.request,false,{error:"Managed bridge cannot be destroyed"}); break;
+                }
+            }
+            var destroy_collected = mcp_collect_targets(request.args,destroy_source);
+            if (variable_struct_exists(destroy_collected,"error")) {
+                mcp_reply(request.request,false,{error:destroy_collected.error}); break;
+            }
+            var destroy_targets = destroy_collected.targets;
+            var destroy_rows = [];
+            var destroy_skipped = 0;
+            for (var dt=0;dt<array_length(destroy_targets);dt++) {
+                var destroy_target = destroy_targets[dt];
+                if (destroy_target == id || !instance_exists(destroy_target)
+                    || destroy_target.object_index == mcp_bridge_asset) {
+                    destroy_skipped++;
+                    continue;
+                }
+                array_push(destroy_rows,{id:destroy_target.id,
+                    object_name:object_get_name(destroy_target.object_index)});
+                instance_destroy(destroy_target);
+            }
+            mcp_reply(request.request,true,{destroyed:destroy_rows,count:array_length(destroy_rows),
+                skipped:destroy_skipped,frame:mcp_frame});
             break;
         case "capture":
             mcp_capture = request.request;

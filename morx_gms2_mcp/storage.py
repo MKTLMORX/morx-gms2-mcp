@@ -6,9 +6,24 @@ import json
 import os
 import re
 import threading
+import time
 import uuid
 from contextlib import AbstractContextManager
 from pathlib import Path, PurePosixPath
+
+
+def replace_retry(temp, path, attempts=20, delay=0.01):
+    """替换目标文件；Windows 上目标可能正被读取，短暂重试再报错。"""
+    for attempt in range(attempts):
+        try:
+            os.replace(temp, path)
+            return
+        except OSError as exc:
+            transient = isinstance(exc, PermissionError) or \
+                getattr(exc, 'winerror', None) in (5, 32)
+            if not transient or attempt + 1 == attempts:
+                raise
+            time.sleep(delay)
 
 
 def digest(data):
@@ -153,7 +168,7 @@ class Storage:
                 file.write(data)
                 file.flush()
                 os.fsync(file.fileno())
-            os.replace(temp, p)
+            replace_retry(temp, p)
         finally:
             temp.unlink(missing_ok=True)
 
@@ -178,10 +193,16 @@ class Storage:
 
     def _check_write_path(self, relative):
         p = self.path(relative)
-        first = PurePosixPath(relative).parts[0]
-        if relative not in (self.yyp.name, self.yyp.with_suffix('.resource_order').name,
-                             'options/windows/options_windows.yy') and first not in {
-                'scripts', 'objects', 'rooms', 'sprites', 'sounds', 'shaders', 'tilesets'}:
+        parts = PurePosixPath(relative).parts
+        first = parts[0]
+        if relative in (self.yyp.name, self.yyp.with_suffix('.resource_order').name,
+                        'options/windows/options_windows.yy'):
+            return p
+        if first == 'datafiles':
+            if len(parts) < 3 or parts[1] != 'fonts':
+                raise ValueError('只允许写入 datafiles/fonts：' + relative)
+            return p
+        if first not in {'scripts', 'objects', 'rooms', 'sprites', 'sounds', 'shaders', 'tilesets'}:
             raise ValueError('不是本服务支持的资源路径：' + relative)
         return p
 

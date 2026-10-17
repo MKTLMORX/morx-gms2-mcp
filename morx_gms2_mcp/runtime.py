@@ -3,6 +3,7 @@ from collections import deque
 from dataclasses import dataclass
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -16,7 +17,7 @@ from uuid import uuid4
 from PIL import Image
 from .display import integer
 from .resources import name_check, trigger_spec
-from .storage import compact_encode, encode, parse_yy
+from .storage import compact_encode, encode, parse_yy, replace_retry
 
 
 @dataclass(frozen=True)
@@ -66,7 +67,7 @@ def atomic_json(path, data):
     try:
         with temp.open('xb') as output:
             output.write(compact_encode(data))
-        os.replace(temp, path)
+        replace_retry(temp, path)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -80,6 +81,20 @@ def child_path(root, name):
 
 KEY_NAMES = {'backspace': 8, 'tab': 9, 'enter': 13, 'escape': 27, 'space': 32,
              'left': 37, 'up': 38, 'right': 39, 'down': 40}
+
+
+def instance_ref(value):
+    """接受实例编号，或 inspect_game 返回的 instance(100002)／@ref instance(100002)。"""
+    if type(value) is int:
+        result = value
+    elif isinstance(value, str):
+        match = re.fullmatch(r'(?:@ref\s+)?instance\((\d+)\)', value.strip())
+        result = int(match.group(1)) if match else int(value) if value.isdigit() else None
+    else:
+        result = None
+    if result is not None and 0 < result <= 2**63 - 1:
+        return result
+    raise ValueError('instance_id 须为正整数或 inspect_game 返回的 instance(...) 标识')
 
 
 def key_code(key):
@@ -421,7 +436,8 @@ class Runtime:
     def request(self, session_id, command, arguments=None, timeout=15):
         with self.guard:
             self._require_session(session_id)
-            if command not in {'state', 'capture', 'input', 'wait', 'event'}:
+            if command not in {'state', 'capture', 'input', 'wait', 'event',
+                               'set', 'spawn', 'destroy'}:
                 raise ValueError('不支持的运行请求')
             if not self._ready():
                 raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
@@ -451,23 +467,195 @@ class Runtime:
             time.sleep(0.025)
         raise ValueError('运行请求超时，执行结果未知；查询 runtime_status 确认，勿直接重试')
 
-    def _state_args(self, object_name='', variables=None, limit=32):
+    def _state_args(self, object_name='', variables=None, limit=32,
+                    scope='instances', instance_id=None):
         integer(limit, 'limit', 1, 100)
-        variables = ['x', 'y', 'hspeed', 'vspeed', 'image_index', 'visible'] if variables is None else variables
+        if scope not in {'instances', 'globals'}:
+            raise ValueError('scope 须为 instances 或 globals')
+        if scope == 'globals':
+            if object_name:
+                raise ValueError('读取全局变量时 object_name 必须为空')
+            if instance_id is not None:
+                raise ValueError('读取全局变量时不支持 instance_id')
+            if not isinstance(variables, list) or not variables:
+                raise ValueError('读取全局变量须提供 1～16 个变量名')
+            limit = 1
+        else:
+            variables = ['x', 'y', 'hspeed', 'vspeed', 'image_index', 'visible'] if variables is None else variables
         if not isinstance(variables, list) or len(variables) > 16 or any(
                 not isinstance(v, str) or not re.fullmatch('[A-Za-z_][A-Za-z0-9_]{0,63}', v) for v in variables):
             raise ValueError('variables 最多 16 个变量名，不接受表达式')
         if object_name and not re.fullmatch('[A-Za-z_][A-Za-z0-9_]{0,63}', object_name):
             raise ValueError('object_name 必须是有效的英语标识符')
-        return object_name, variables, limit
+        if instance_id is not None:
+            if scope != 'instances':
+                raise ValueError('instance_id 只用于实例读取')
+            instance_id = instance_ref(instance_id)
+        return object_name, variables, limit, scope, instance_id
 
-    def inspect(self, session_id, object_name='', variables=None, limit=32):
-        object_name, variables, limit = self._state_args(object_name, variables, limit)
-        result = self.request(session_id, 'state', {'object_name': object_name,
-            'variables': variables, 'limit': limit})
+    def inspect(self, session_id, object_name='', variables=None, limit=32,
+                scope='instances', instance_id=None):
+        object_name, variables, limit, scope, instance_id = self._state_args(
+            object_name, variables, limit, scope, instance_id)
+        args = {'object_name': object_name, 'variables': variables, 'limit': limit,
+                'scope': scope}
+        if instance_id is not None:
+            args['instance_id'] = instance_id
+        result = self.request(session_id, 'state', args)
         if isinstance(result.get('data'), dict) and 'error' in result['data']:
             raise ValueError(self._redact(str(result['data']['error'])))
         return result
+
+    @staticmethod
+    def _set_value(value, depth, budget, location):
+        """把 JSON 值限制为可安全写入 GML 的标量、数组或结构体。"""
+        budget[0] -= 1
+        if budget[0] < 0:
+            raise ValueError(location + ' 的节点数超过 256')
+        if depth > 3:
+            raise ValueError(location + ' 的嵌套深度超过 4 层')
+        if value is None:
+            raise ValueError(location + ' 不支持 null；请使用 0、空数组或空结构体')
+        if type(value) is bool:
+            return
+        if type(value) is int:
+            if not -(2**53) <= value <= 2**53:
+                raise ValueError(location + ' 的整数超出 GML real 精确范围')
+            return
+        if type(value) is float:
+            if not math.isfinite(value):
+                raise ValueError(location + ' 必须是有限数值')
+            return
+        if isinstance(value, str):
+            if '\0' in value or len(value) > 4096:
+                raise ValueError(location + ' 的字符串不能含 NUL 且最多 4096 字符')
+            return
+        if isinstance(value, list):
+            if len(value) > 32:
+                raise ValueError(location + ' 的数组最多 32 项')
+            for index, child in enumerate(value):
+                Runtime._set_value(child, depth + 1, budget, f'{location}[{index}]')
+            return
+        if isinstance(value, dict):
+            if len(value) > 32:
+                raise ValueError(location + ' 的结构体最多 32 个字段')
+            for key, child in value.items():
+                if not isinstance(key, str) or not key or len(key) > 64 or '\0' in key:
+                    raise ValueError(location + ' 的结构体字段名必须是 1～64 字符的字符串')
+                Runtime._set_value(child, depth + 1, budget, f'{location}.{key}')
+            return
+        raise ValueError(location + ' 只能包含布尔、数值、字符串、数组或结构体')
+
+    def _set_args(self, values, scope='instances', object_name='', instance_id=None,
+                  limit=32, create_missing=False):
+        integer(limit, 'limit', 1, 100)
+        if scope not in {'instances', 'globals'}:
+            raise ValueError('scope 须为 instances 或 globals')
+        if type(create_missing) is not bool:
+            raise ValueError('create_missing 必须为布尔值')
+        if not isinstance(values, dict) or not 1 <= len(values) <= 16:
+            raise ValueError('values 须包含 1～16 个变量')
+        for name, value in values.items():
+            if not isinstance(name, str) or not re.fullmatch('[A-Za-z_][A-Za-z0-9_]{0,63}', name):
+                raise ValueError('变量名必须是有效的英语标识符')
+            self._set_value(value, 0, [256], name)
+        from .runtime_bridge import OBJECT
+        if scope == 'globals':
+            if object_name:
+                raise ValueError('写入全局变量时 object_name 必须为空')
+            if instance_id is not None:
+                raise ValueError('写入全局变量时不支持 instance_id')
+            limit = 1
+        else:
+            if object_name:
+                name_check(object_name)
+                if object_name == OBJECT:
+                    raise ValueError('受管理的测试桥接不能通过运行期工具修改')
+            if instance_id is not None:
+                instance_id = instance_ref(instance_id)
+                limit = 1
+            if not object_name and instance_id is None:
+                raise ValueError('写入实例变量须提供 object_name 或 instance_id')
+        try:
+            raw = json.dumps(values, ensure_ascii=False, separators=(',', ':'))
+        except (TypeError, ValueError) as exc:
+            raise ValueError('values 无法序列化为 JSON') from exc
+        if len(raw.encode('utf-8')) > 64 * 1024:
+            raise ValueError('values 序列化后不能超过 64 KiB')
+        args = {'values': values, 'scope': scope, 'object_name': object_name,
+                'limit': limit, 'create_missing': create_missing}
+        if instance_id is not None:
+            args['instance_id'] = instance_id
+        return args
+
+    def set_variables(self, session_id, values, scope='instances', object_name='',
+                      instance_id=None, limit=32, create_missing=False, dry_run=True):
+        """写入全局或实例变量；先校验全部目标，再在桥接中一次提交。"""
+        args = self._set_args(values, scope, object_name, instance_id, limit, create_missing)
+        with self.guard:
+            self._require_session(session_id)
+            if not dry_run and not self._ready():
+                raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
+        preview = {'dry_run': dry_run, 'session_id': session_id, **args}
+        if dry_run:
+            return preview
+        return self.request(session_id, 'set', args)
+
+    def _spawn_args(self, object_name, x=0, y=0, layer_name='', depth=0):
+        name_check(object_name)
+        from .runtime_bridge import OBJECT
+        if object_name == OBJECT:
+            raise ValueError('受管理的测试桥接不能通过运行期工具创建')
+        for value, label in ((x, 'x'), (y, 'y')):
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError(label + ' 必须是有限数值')
+        if not isinstance(layer_name, str) or len(layer_name) > 255 or '\0' in layer_name:
+            raise ValueError('layer_name 必须是 0～255 字符的字符串')
+        if type(depth) is not int or not -(10**6) <= depth <= 10**6:
+            raise ValueError('depth 须为 -1000000～1000000 的整数')
+        return {'object_name': object_name, 'x': x, 'y': y,
+                'layer_name': layer_name, 'depth': depth}
+
+    def spawn(self, session_id, object_name, x=0, y=0, layer_name='', depth=0, dry_run=True):
+        """在运行中的当前房间创建一个实例；layer_name 为空时按 depth 放置。"""
+        args = self._spawn_args(object_name, x, y, layer_name, depth)
+        with self.guard:
+            self._require_session(session_id)
+            if not dry_run and not self._ready():
+                raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
+        preview = {'dry_run': dry_run, 'session_id': session_id, **args}
+        if dry_run:
+            return preview
+        return self.request(session_id, 'spawn', args)
+
+    def _destroy_args(self, object_name='', instance_id=None, limit=1):
+        integer(limit, 'limit', 1, 100)
+        from .runtime_bridge import OBJECT
+        if object_name:
+            name_check(object_name)
+            if object_name == OBJECT:
+                raise ValueError('受管理的测试桥接不能通过运行期工具销毁')
+        if instance_id is not None:
+            instance_id = instance_ref(instance_id)
+            limit = 1
+        if not object_name and instance_id is None:
+            raise ValueError('销毁实例须提供 object_name 或 instance_id')
+        args = {'object_name': object_name, 'limit': limit}
+        if instance_id is not None:
+            args['instance_id'] = instance_id
+        return args
+
+    def destroy(self, session_id, object_name='', instance_id=None, limit=1, dry_run=True):
+        """销毁单个实例或指定物体的最多 limit 个实例；不会销毁受管理桥接。"""
+        args = self._destroy_args(object_name, instance_id, limit)
+        with self.guard:
+            self._require_session(session_id)
+            if not dry_run and not self._ready():
+                raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
+        preview = {'dry_run': dry_run, 'session_id': session_id, **args}
+        if dry_run:
+            return preview
+        return self.request(session_id, 'destroy', args)
 
     def _event_args(self, object_name, event, number=0, collision_object=None,
                     key=None, instance_id=None, limit=32):
@@ -483,7 +671,7 @@ class Runtime:
                 raise ValueError('key 与 number 只能提供一个')
             number = key_code(key)
         if instance_id is not None:
-            integer(instance_id, 'instance_id', 1, 2**63 - 1)
+            instance_id = instance_ref(instance_id)
         integer(limit, 'limit', 1, 100)
         event_type, event_number, collision = trigger_spec(event, number, collision_object)
         args = {'object_name': object_name, 'event': event, 'event_type': event_type,
@@ -512,8 +700,14 @@ class Runtime:
         if not isinstance(step, dict):
             raise ValueError('序列步骤须为对象')
         action = step.get('action')
-        allowed = {'wait': {'action', 'frames'}, 'input': {'action', 'keys', 'frames'},
-                   'capture': {'action'}, 'state': {'action', 'object_name', 'variables', 'limit'},
+        allowed = {'wait': {'action', 'frames'},
+                   'input': {'action', 'keys', 'frames', 'mode'},
+                   'capture': {'action'},
+                   'state': {'action', 'object_name', 'variables', 'limit', 'scope', 'instance_id'},
+                   'set': {'action', 'values', 'scope', 'object_name', 'instance_id',
+                           'limit', 'create_missing'},
+                   'spawn': {'action', 'object_name', 'x', 'y', 'layer_name', 'depth'},
+                   'destroy': {'action', 'object_name', 'instance_id', 'limit'},
                    'event': {'action', 'object_name', 'event', 'number', 'collision_object',
                              'key', 'instance_id', 'limit'}}
         if action not in allowed:
@@ -529,18 +723,39 @@ class Runtime:
             frames = step.get('frames', 1)
             integer(frames, 'frames', 1, 300)
             key_codes(step.get('keys'))
-            return {'action': 'input', 'keys': step.get('keys'), 'frames': frames}
+            mode = step.get('mode', 'message')
+            if mode not in {'message', 'state'}:
+                raise ValueError('按键模式须为 message 或 state')
+            return {'action': 'input', 'keys': step.get('keys'),
+                    'frames': frames, 'mode': mode}
         if action == 'capture':
             return {'action': 'capture'}
+        if action == 'set':
+            args = self._set_args(step.get('values'), step.get('scope', 'instances'),
+                step.get('object_name', ''), step.get('instance_id'),
+                step.get('limit', 32), step.get('create_missing', False))
+            return {'action': 'set', **args}
+        if action == 'spawn':
+            args = self._spawn_args(step.get('object_name'), step.get('x', 0),
+                step.get('y', 0), step.get('layer_name', ''), step.get('depth', 0))
+            return {'action': 'spawn', **args}
+        if action == 'destroy':
+            args = self._destroy_args(step.get('object_name', ''),
+                step.get('instance_id'), step.get('limit', 1))
+            return {'action': 'destroy', **args}
         if action == 'event':
             args = self._event_args(step.get('object_name'), step.get('event'),
                 step.get('number', 0), step.get('collision_object'), step.get('key'),
                 step.get('instance_id'), step.get('limit', 32))
             return {'action': 'event', **args}
-        object_name, variables, limit = self._state_args(step.get('object_name', ''),
-            step.get('variables'), step.get('limit', 32))
-        return {'action': 'state', 'object_name': object_name,
-                'variables': variables, 'limit': limit}
+        object_name, variables, limit, scope, instance_id = self._state_args(
+            step.get('object_name', ''), step.get('variables'), step.get('limit', 32),
+            step.get('scope', 'instances'), step.get('instance_id'))
+        normalized = {'action': 'state', 'object_name': object_name,
+                      'variables': variables, 'limit': limit, 'scope': scope}
+        if instance_id is not None:
+            normalized['instance_id'] = instance_id
+        return normalized
 
     def run_sequence(self, session_id, steps, dry_run=True, max_images=4):
         """按顺序执行受限动作；返回每步结果，截图以独立 PNG 字节列表返回。"""
@@ -574,10 +789,16 @@ class Runtime:
                 if action == 'wait':
                     data = self.wait(session_id, step['frames'])
                 elif action == 'input':
-                    data = self.input(session_id, step['keys'], step['frames'], dry_run=False)
+                    data = self.input(session_id, step['keys'], step['frames'],
+                                      dry_run=False, mode=step['mode'])
                 elif action == 'state':
                     data = self.inspect(session_id, step['object_name'],
-                                        step['variables'], step['limit'])
+                                        step['variables'], step['limit'], step['scope'],
+                                        step.get('instance_id'))
+                elif action in ('set', 'spawn', 'destroy'):
+                    data = self.request(session_id, action,
+                                        {key: value for key, value in step.items()
+                                         if key != 'action'})
                 elif action == 'event':
                     data = self.request(session_id, 'event',
                                         {key: value for key, value in step.items() if key != 'action'})
@@ -601,15 +822,33 @@ class Runtime:
         return {'dry_run': False, 'session_id': session_id, 'ok': True,
                 'results': results, 'pictures': pictures}
 
-    def input(self, session_id, keys, frames=1, dry_run=True):
+    def input(self, session_id, keys, frames=1, dry_run=True, mode='message'):
+        """按住按键若干帧。message 通过窗口消息产生真实按下/释放，state 只改桥接按键状态。"""
         integer(frames, 'frames', 1, 300)
         codes = key_codes(keys)
+        if mode not in {'message', 'state'}:
+            raise ValueError('按键模式须为 message 或 state')
         with self.guard:
             self._require_session(session_id)
+            if not dry_run and mode == 'message' and not self._ready():
+                raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
+        preview = {'dry_run': dry_run, 'session_id': session_id, 'keys': keys,
+                   'frames': frames, 'mode': mode}
         if dry_run:
-            return {'dry_run': True, 'session_id': session_id, 'keys': keys, 'frames': frames}
-        return self.request(session_id, 'input', {'keys': codes, 'frames': frames},
-                            timeout=max(15, frames / 10 + 10))
+            return preview
+        if mode == 'state':
+            return self.request(session_id, 'input', {'keys': codes, 'frames': frames},
+                                timeout=max(15, frames / 10 + 10))
+        from . import win_keyboard, win_mouse
+        window = win_mouse.find_game_window(self.process.pid, 'MORX_Run_' + session_id)
+        win_keyboard.key_down(window, codes)
+        try:
+            result = self.wait(session_id, frames)
+        finally:
+            win_keyboard.key_up(window, codes)
+        return {'dry_run': False, **preview,
+                'window': {'width': window.width, 'height': window.height},
+                'data': result.get('data'), 'frame': result.get('frame')}
 
     def wait(self, session_id, frames=1):
         integer(frames, 'frames', 1, 600)

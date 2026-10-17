@@ -40,23 +40,33 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
             'transport': 'stdio', 'events': list(EVENTS) + ['Alarm (0..11)', 'User (0..15)',
                 'Collision (collision_object=target)', 'Keyboard/KeyPress/KeyRelease (number=key code)',
                 'Mouse (number=event number)'],
-            'resources': ['script', 'object', 'room', 'PNG sprite', 'PCM WAV sound',
-                          'GLSL ES shader', 'tileset', 'tile layer'],
+            'resources': ['script', 'object', 'room', 'PNG sprite', 'WAV/OGG sound',
+                          'TTF/OTF/TTC font data (IncludedFile)', 'GLSL ES shader',
+                          'tileset', 'tile layer'],
             'sprite_editing': ['查询普通位图动画', '播放速度及单位', '自定义原点', '帧重排', '逐帧时长'],
             'sprite_editing_ide_verified': True,
             'display_settings': ['Windows 显示名称与启动选项', '房间尺寸', '相机范围', '视口位置及尺寸'],
             'display_settings_ide_verified': True,
             'workflow': ['资源制作', 'GML 读取及哈希保护修改', '隔离 Windows VM 构建运行', '游戏画面',
-                         '实例状态', '日志', '数据事件触发', '按键测试'],
+                         '实例与全局变量状态', '运行期变量写入', '运行期实例生成和销毁',
+                         '日志', '数据事件触发', '按键测试'],
             'runtime_enabled': runtime.options.enabled,
+            'inspect_scopes': ['instances', 'globals'],
+            'write_scopes': ['instances', 'globals'],
+            'input_modes': ['message', 'state'],
             'runtime_verified': True,
-            'runtime_verification': 'Igor 2026.0.0.23 Windows VM：编译、桥接、截图、状态、等待、事件触发、窗口消息鼠标、停止与清理',
+            'runtime_verification': 'Igor 2026.0.0.23 Windows VM：编译、桥接、截图、实例/全局变量读写、实例生成/销毁、等待、事件触发、窗口消息鼠标和键盘、停止与清理',
             'runtime_ide_verified': False,
-            'limitations': ['不操控 IDE', '不支持删除或重命名资源', '新建工具不覆盖已有资源；已有代码须用 update_code',
-                '不创建字体、路径、时间线、序列或扩展资源', '多个文件整体非操作系统级原子事务',
+            'limitations': ['不操控 IDE', '删除资源要求引用为空；重命名只更新资源引用，不改写 GML 中的名称',
+                '变量按名称读写，不求值表达式；读取数组和结构体按深度与数量截断',
+                '写入值只支持布尔、数值、字符串、数组和结构体，不支持 null/GML 表达式或函数引用',
+                '新建工具不覆盖已有资源；已有代码须用 update_code',
+                '字体以 datafiles 下的 IncludedFile 导入，不烘焙 GMFont；不含路径、时间线、序列或扩展资源',
+                '多个文件整体非操作系统级原子事务',
                 '不增删精灵帧或编辑图像；复杂动画时间轴拒绝修改',
                 '不提供原生断点或逐行调试；event_perform 只执行事件代码，不更新真实按键/鼠标/碰撞状态',
-                '鼠标默认通过窗口消息投递；physical 模式才移动真实光标并抢焦点；Draw 事件不能由触发器执行'],
+                '鼠标和键盘默认通过窗口消息投递，不改动系统输入；鼠标 physical 模式才移动真实光标并抢焦点',
+                'Draw 事件不能由触发器执行；实例生成/销毁只作用于当前房间'],
             'verified_ide': '2026.0.0.16', 'verified_runtime': '2026.0.0.23'}
 
     @mcp.tool(annotations=read)
@@ -129,27 +139,71 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
 
     @mcp.tool(annotations=read)
     def inspect_game(session_id: str, object_name: str = '', variables: list[str] | None = None,
-                     limit: int = 32) -> dict:
-        """读取运行中房间、窗口、GUI 及最多 100 个实例的指定变量。仅标量值，不求值表达式。"""
-        return runtime.inspect(session_id, object_name, variables, limit)
+                     limit: int = 32, scope: str = 'instances',
+                     instance_id: int | str | None = None) -> dict:
+        """读取运行中房间、窗口、GUI 及最多 100 个实例的指定变量。
+        scope='globals' 读取全局变量，此时 variables 必填且 object_name 留空。
+        instance_id 可直接使用返回的 id（如 @ref instance(100002)）读取单个实例。
+        标量按原值返回；数组和结构体按深度 3、每个变量最多 64 个节点、每层最多 32 项截断。
+        只按名称读取变量，不求值表达式。
+        """
+        return runtime.inspect(session_id, object_name, variables, limit, scope, instance_id)
 
     @mcp.tool(annotations=change)
-    def send_game_input(session_id: str, keys: list[str], frames: int = 1, dry_run: bool = True) -> dict:
-        """向有焦点的游戏发送字母、数字、方向键等，保持 1～300 游戏帧后释放；不重复注入按下。
-        只更新按键按住状态，不产生 KeyPress/KeyRelease 事件；事件测试改用 trigger_game_event。
-        不支持系统键或组合快捷键；失焦释放。输入可能影响游戏进程，仅用于受信任的测试会话。
+    def set_game_variables(session_id: str, values: dict, scope: str = 'instances',
+                           object_name: str = '', instance_id: int | str | None = None,
+                           limit: int = 32, create_missing: bool = False,
+                           dry_run: bool = True) -> dict:
+        """按名称写入运行中的全局变量或实例变量，返回每个目标的旧值。
+        scope='instances' 时须提供 object_name 或 inspect_game 返回的 instance_id；
+        省略 instance_id 时最多写入该物体 limit 个实例。scope='globals' 只写全局变量。
+        值支持布尔、数值、字符串、数组和结构体（最多 4 层、每层 32 项、每个变量 256 节点），不支持 null。
+        create_missing=false 时任一变量不存在就整体拒绝，不会部分写入；受管理的测试桥接不能修改。
+        只按名称写入，不求值表达式；写入前后可用 inspect_game 验证。
         """
-        return runtime.input(session_id, keys, frames, dry_run)
+        return runtime.set_variables(session_id, values, scope, object_name, instance_id,
+                                     limit, create_missing, dry_run)
+
+    @mcp.tool(annotations=change)
+    def spawn_game_instance(session_id: str, object_name: str, x: float = 0, y: float = 0,
+                            layer_name: str = '', depth: int = 0,
+                            dry_run: bool = True) -> dict:
+        """在当前运行房间按物体名创建一个实例，返回新实例 id。
+        layer_name 非空时在该图层创建（图层必须存在于当前房间）；为空时按 depth 创建。
+        创建会正常触发 Create 事件；受管理的测试桥接不能创建。只影响本次受管运行会话。
+        """
+        return runtime.spawn(session_id, object_name, x, y, layer_name, depth, dry_run)
+
+    @mcp.tool(annotations=change)
+    def destroy_game_instance(session_id: str, object_name: str = '',
+                              instance_id: int | str | None = None, limit: int = 1,
+                              dry_run: bool = True) -> dict:
+        """销毁指定实例，或当前房间中某个物体的最多 limit 个实例；返回被销毁实例列表。
+        提供 instance_id 时只销毁该实例；省略时须提供 object_name。不会销毁受管理的测试桥接。
+        销毁会正常触发 Destroy 和 CleanUp 事件。
+        """
+        return runtime.destroy(session_id, object_name, instance_id, limit, dry_run)
+
+    @mcp.tool(annotations=change)
+    def send_game_input(session_id: str, keys: list[str], frames: int = 1,
+                        mode: str = 'message', dry_run: bool = True) -> dict:
+        """按住字母、数字、方向键等 1～300 个游戏帧。
+        默认 mode='message' 向受管游戏窗口投递 WM_KEYDOWN/WM_KEYUP，不移动光标、不切换焦点，
+        可以触发 keyboard_check_pressed、KeyPress 和 KeyRelease。
+        mode='state' 只更新桥接按键按住状态，不产生按下/释放事件，并要求游戏窗口有焦点。
+        不支持系统键或组合快捷键；仅用于受信任的测试会话。
+        """
+        return runtime.input(session_id, keys, frames, dry_run, mode)
 
     @mcp.tool(annotations=change)
     def trigger_game_event(session_id: str, object_name: str, event: str, number: int = 0,
                            collision_object: str | None = None, key: str | int | None = None,
-                           instance_id: int | None = None, limit: int = 32,
+                           instance_id: int | str | None = None, limit: int = 32,
                            dry_run: bool = True) -> dict:
         """通过桥接数据执行目标物体的事件代码（event_perform），不需要物理键鼠或前台焦点。
         支持 Keyboard/KeyPress/KeyRelease、Mouse、Collision、Alarm、User、Step/Other 等；
         Keyboard 类可用 key 指定名称或键码，Collision 用 collision_object 指定目标。
-        省略 instance_id 时最多触发该物体 limit 个实例；Draw 事件不支持。
+        省略 instance_id 时最多触发该物体 limit 个实例；也可直接传 inspect_game 返回的 id。Draw 事件不支持。
         只执行事件代码，不更新真实按键、鼠标坐标或碰撞状态。
         """
         return runtime.trigger_event(session_id, object_name, event, number,
@@ -174,8 +228,9 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
     @mcp.tool(annotations=change)
     def run_game_sequence(session_id: str, steps: list[dict], max_images: int = 4,
                           dry_run: bool = True):
-        """按顺序执行 1～32 个 wait/input/state/capture/event 动作；默认只预览。
-        event 动作通过桥接数据执行事件代码，不需要物理键鼠或前台焦点。
+        """按顺序执行 1～32 个 wait/input/state/set/spawn/destroy/capture/event 动作；默认只预览。
+        input 默认使用窗口消息，可产生真实按下/释放；set 写入变量；spawn/destroy 增删当前房间实例；
+        event 动作通过桥接数据执行事件代码。
         输入和等待按游戏自然帧计数，总帧数最多 1800；截图最多 max_images 张，按顺序作为图像返回。
         中途失败会返回已完成步骤和失败步骤；长序列应在客户端工具超时内完成。
         """
@@ -245,6 +300,16 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
         return project.add_event(object_name, event, code, number, collision_object, dry_run)
 
     @mcp.tool(annotations=change)
+    def remove_object_event(object_name: str, event: str, number: int = 0,
+                            collision_object: str | None = None,
+                            dry_run: bool = True) -> dict:
+        """删除物体中一个已有事件及其 GML 文件；不删除物体或资源。
+        Collision 事件须提供 collision_object；Keyboard/KeyPress/KeyRelease 和 Mouse 用 number。
+        预览列出将删除的事件文件；GML Visual 事件和缺失文件会拒绝操作。
+        """
+        return project.remove_event(object_name, event, number, collision_object, dry_run)
+
+    @mcp.tool(annotations=change)
     def configure_object(name: str, persistent: bool | None = None, visible: bool | None = None,
                          sprite: str | None = None, parent: str | None = None, dry_run: bool = True) -> dict:
         """调整常驻、可见、精灵和父物体。null 保留，sprite/parent 空字符串清空。拒绝继承循环。"""
@@ -254,6 +319,24 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
     def move_resource(name: str, group: str, dry_run: bool = True) -> dict:
         """调整已有资源的 IDE 虚拟分组；磁盘资源目录保持原生结构。"""
         return project.move_resource(name, group, dry_run)
+
+    @mcp.tool(annotations=change)
+    def delete_resource(name: str, expected_sha256: str | None = None,
+                        dry_run: bool = True) -> dict:
+        """删除未被其他资源引用的资源及其全部文件，保留虚拟分组。
+        预览列出将删除的文件；受管理的测试桥接不能删除。
+        建议传入 inspect_resource 中资源描述文件的 sha256，避免删除过期目标。
+        """
+        return project.delete_resource(name, expected_sha256, dry_run)
+
+    @mcp.tool(annotations=change)
+    def rename_resource(name: str, new_name: str, expected_sha256: str | None = None,
+                        dry_run: bool = True) -> dict:
+        """重命名资源并移动其文件，更新 .yyp、排序文件和资源引用。
+        碰撞事件文件名会同步调整；GML 代码中按名称引用的资源不会自动改写。
+        建议传入 inspect_resource 中资源描述文件的 sha256。
+        """
+        return project.rename_resource(name, new_name, expected_sha256, dry_run)
 
     @mcp.tool(annotations=add)
     def create_room(name: str, width: int = 1366, height: int = 768, group: str = '房间', dry_run: bool = True) -> dict:
@@ -283,9 +366,20 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
         return project.import_sprite(name, png_paths, group, speed, origin_x, origin_y, dry_run)
 
     @mcp.tool(annotations=add)
-    def import_sound(name: str, wav_path: str, group: str = '声音', volume: float = 1.0, dry_run: bool = True) -> dict:
-        """从明确给出的本地 PCM WAV 路径导入音效；验证声道、位深和数据完整性。"""
-        return project.import_sound(name, wav_path, group, volume, dry_run)
+    def import_sound(name: str, audio_path: str, group: str = '声音', volume: float = 1.0,
+                     dry_run: bool = True) -> dict:
+        """从明确给出的本地 WAV 或 OGG 路径导入声音；WAV 验证 PCM 声道/位深，OGG 验证 Vorbis 头和时长。
+        原文件不修改；返回时长、采样率、声道数和文件哈希。
+        """
+        return project.import_sound(name, audio_path, group, volume, dry_run)
+
+    @mcp.tool(annotations=add)
+    def import_font(name: str, font_path: str, dry_run: bool = True) -> dict:
+        """把 TTF/TTE/OTF/TTC 字体作为 IncludedFile 导入项目的 datafiles/fonts。
+        生成同名文件（如 name='font_ui' 导入 font_ui.ttf）并更新 .yyp；原字体不修改。
+        这不会烘焙 GMFont 资源；返回 runtime_path 和 font_add 调用示例，供项目在运行时加载。
+        """
+        return project.import_font(name, font_path, dry_run)
 
     @mcp.tool(annotations=read)
     def inspect_sprite(name: str) -> dict:

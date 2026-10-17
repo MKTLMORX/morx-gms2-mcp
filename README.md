@@ -6,23 +6,15 @@
 [![Windows](https://img.shields.io/badge/Platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)](#适用范围)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 
-**让 AI 助手参与 GameMaker 项目的制作、运行、检查与迭代。**
+**使用 AI 客户端制作、运行和检查 GameMaker 项目。**
 
-MORX GMS2 MCP 是一个本地 stdio MCP 服务：AI 先理解项目，再制作资源、修改 GML、调整动画与显示设置；随后通过隔离的 Windows VM 副本编译运行，读取画面、实例状态、日志和运行时异常，并根据真实反馈继续修改。所有修改默认先预览，写入保留事务备份。
+MORX GMS2 MCP 是一个本地 stdio MCP 服务。AI 客户端可以读取项目结构、制作资源和修改 GML，也可以通过隔离的 Windows VM 副本编译运行，并读取画面、实例状态、日志和运行时异常。修改默认先预览，写入保留事务备份。
 
-*Author, run, observe, and iterate on GameMaker projects with real feedback.*
+*Local stdio MCP server for GameMaker project authoring, isolated runs, and runtime inspection.*
 
-**真实闭环** · **安全默认** · **数据输入** · **44 个工具** · **MIT**
+当前提供 44 个工具；服务使用本地 stdio，默认只读，运行能力默认关闭，MIT 许可。
 
 [快速开始](#快速开始) · [能做什么](#能做什么) · [连接客户端](#连接客户端) · [使用示例](#使用示例) · [运行与观察](#运行与观察) · [工具清单](#工具清单) · [English](#english-quick-start)
-
-## 亮点
-
-- **真实运行闭环**：编译 → 运行 → 截图 / 实例状态 / 日志 / 异常 → 修改 → 再验证。
-- **安全默认**：所有修改先预览；写入有 SHA-256 冲突检测、事务备份和撤销。
-- **数据输入**：KeyPress、Mouse、Collision 等事件可通过桥接数据触发，不依赖物理键鼠。
-- **隔离运行**：独立项目副本和存档目录；停止后自动清理。
-- **不操控 IDE**：不抓取桌面、不控制 IDE 图形界面；运行时信息来自游戏内桥接。
 
 ## 能做什么
 
@@ -37,8 +29,6 @@ MORX GMS2 MCP 是一个本地 stdio MCP 服务：AI 先理解项目，再制作�
 | 运行观察 | 游戏截图、实例变量、运行日志、运行时异常、数据事件触发、窗口消息鼠标、批量动作序列 |
 | 项目结构 | 创建多级中文分组，移动虚拟分组，校验资源引用 |
 | 修改与恢复 | 默认预览、固定项目绑定、冲突检测、事务备份与撤销 |
-
-**44 个工具 · 本地 stdio · 默认只读 · 运行默认关闭 · MIT**
 
 ## 开发工作流
 
@@ -380,7 +370,7 @@ PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最
 
 ## English quick start
 
-MORX GMS2 MCP provides a local tool foundation for AI-assisted GameMaker development. Let an assistant inspect your project, create and edit resources, build and run an isolated Windows copy, observe the game, and refine the result using real feedback. It exposes 44 stdio tools with previews, backups and rollback.
+MORX GMS2 MCP is a local stdio server for AI-assisted GameMaker development. An assistant can inspect the project, create and edit resources, build and run an isolated Windows copy, observe the game, and refine the result from runtime output. It exposes 44 tools with previews, backups and rollback.
 
 Use an inspect → author → run and observe → adjust workflow. The AI client coordinates the work; this server handles project files, resources, GML and isolated runs. Runtime observation uses the server's own bridge inside the game, not desktop capture. IDE GUI control and native breakpoint/step debugging remain outside its scope.
 

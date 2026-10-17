@@ -218,7 +218,7 @@ class Runtime:
                 for name in files:
                     relative = (relative_dir / name).as_posix()
                     source = current / name
-                    if source.is_symlink() or source.resolve() != source.absolute():
+                    if not link_free(source):
                         raise ValueError('运行副本不复制链接或目录联接：' + relative)
                     count += 1
                     total += source.stat().st_size
@@ -255,7 +255,7 @@ class Runtime:
             if not path:
                 continue
             path = Path(path)
-            if path.name != expected or path.is_symlink() or path.resolve() != path.absolute():
+            if path.name != expected or not link_free(path):
                 continue
             shutil.rmtree(path, ignore_errors=True)
         work_root = session.get('directory')

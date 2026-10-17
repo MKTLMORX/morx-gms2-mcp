@@ -354,7 +354,7 @@ class RuntimeTests(ProjectFixture):
     def test_run_copy_is_outside_project_and_stop_cleans_up(self):
         result = self.launch()
         snapshot = Path(result['snapshot_project'])
-        self.assertTrue(snapshot.is_relative_to(Path(self.options.sandbox_root)))
+        self.assertTrue(snapshot.is_relative_to(Path(self.options.sandbox_root).resolve()))
         self.assertFalse(snapshot.is_relative_to(self.root))
         build_directory = Path(self.runtime.session['directory'])
         save_directory = Path(self.runtime.session['save_directory'])

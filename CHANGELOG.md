@@ -11,7 +11,7 @@
 - `inspect_game` 不再用源项目校验运行副本，桥接返回的错误按失败处理。
 - 移除测试用 `.mcp-probe-project` 绑定绕过；统一事件编号校验和实例结构；`client-config` 的 Codex 环境变量改为从同一份配置生成。
 - 修正 Igor `Windows Run` 命令：不传 `/of`，由 Igor 在运行目录生成输出；传 `/of` 会导致 Runner 加载错误文件并退出。
-- 运行目录的链接检查改为 Windows reparse point 判断，避免 GitHub Actions 临时目录的短路径被 `resolve()` 误判。
+- 运行的链接检查改为 Windows reparse point 判断，覆盖控制文件、项目复制和清理，避免 GitHub Actions 临时目录的短路径被 `resolve()` 误判。
 - 新增运行、桥接修复、脱敏、清理和绑定测试，共 80 项通过。
 - 在 IDE 2026.0.0.16 / Runtime 2026.0.0.23 完成真实验收：MCP 创建控制器和桥接，Igor 编译运行，桥接就绪，截图包含 DrawGUI 内容，实例状态可读，等待 30 帧和发送方向键生效，停止后构建副本与存档均已清理。IDE 图形界面未参与本轮验收。
 

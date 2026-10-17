@@ -16,17 +16,17 @@ MORX GMS2 MCP 为 AI 助手提供操作 GameMaker 项目的工具接口。让助
 
 | 资源与操作 | 能力 |
 | --- | --- |
-| 脚本与物体 | 创建脚本、物体和常用事件，配置精灵引用、父物体及常驻状态 |
+| 脚本与物体 | 创建脚本、物体和常用事件（含碰撞、键盘、鼠标），配置精灵引用、父物体及常驻状态 |
 | 房间与实例 | 创建房间和实例图层，放置物体，设置启动房间 |
 | 美术与音频 | 导入多帧 PNG、PCM WAV，创建 GLSL ES 着色器 |
 | 精灵动画 | 查询已有位图精灵，调整速度、原点、帧顺序和逐帧时长 |
 | 显示设置 | Windows 启动选项，以及独立的房间、相机和视口配置 |
 | GML 与运行 | 读取及哈希保护修改 GML；安装测试桥接；隔离 Windows VM 构建运行 |
-| 运行观察 | 游戏截图、实例变量、运行日志、等待自然帧、受限制的键盘输入 |
+| 运行观察 | 游戏截图、实例变量、运行日志、运行时异常、数据事件触发、窗口消息鼠标、批量动作序列 |
 | 项目结构 | 创建多级中文分组，移动虚拟分组，校验资源引用 |
 | 修改与恢复 | 默认预览、固定项目绑定、冲突检测、事务备份与撤销 |
 
-**35 个工具 · 本地 stdio · 默认只读 · 运行默认关闭 · MIT**
+**44 个工具 · 本地 stdio · 默认只读 · 运行默认关闭 · MIT**
 
 ## 开发工作流
 
@@ -37,7 +37,7 @@ MORX GMS2 MCP 为 AI 助手提供操作 GameMaker 项目的工具接口。让助
 | 理解项目 | 查询资源、分组、引用、动画、房间和相机配置，确定修改目标 |
 | 制作与配置 | 创建资源和 GML 事件，读取及修改已有 GML，编辑动画及显示设置，先预览再写入 |
 | 运行观察 | 安装测试桥接后用 `run_game` 构建隔离副本；用 `runtime_status` 等待就绪，再截图、查询实例变量和日志 |
-| 调整并验证 | 用 `read_code`/`update_code` 修改 GML，`stop_game` 后重新运行；用按键输入和等待帧复现交互 |
+| 调整并验证 | 用 `read_code`/`update_code` 修改 GML，`stop_game` 后重新运行；用数据事件、窗口消息鼠标和等待帧复现交互 |
 
 本仓库提供的接口覆盖项目文件、资源、GML 和隔离运行。运行能力默认关闭，需要 `--allow-run` 和本机 Runtime 配置；截图和状态来自游戏内的测试桥接，不抓取桌面。IDE 图形界面、原生断点和逐行调试仍需使用 GameMaker 本身。
 
@@ -132,6 +132,12 @@ claude mcp get morx-gms2-mcp
 
 > 向右移动 60 帧，再等待 30 帧后截图；然后停止运行并清理副本。
 
+> 用数据触发 obj_player 的 KeyPress 事件（E 键），不要发送物理键盘输入。
+
+> 在游戏窗口客户区 (480,270) 点击一次；默认走窗口消息，不要移动我的真实光标。
+
+> 依次等待 10 帧、触发 obj_enemy 的碰撞事件并截图，把序列结果一起返回。
+
 ## 使用流程与写入保护
 
 1. 保存 IDE 中尚未落盘的内容，调用 `server_info` 和 `inspect_project`。
@@ -166,9 +172,10 @@ claude mcp get morx-gms2-mcp
 1. 保存 IDE 中尚未落盘的内容；调用 `inspect_project` 确认结构。
 2. `install_runtime_bridge` 先预览再执行。它在启动房间安装常驻测试物体 `sys_morx_runtime` 和实例图层；没有会话文件时物体自行销毁。安装是一次普通事务，可用 `restore_backup` 撤销。
 3. `run_game` 返回 `session_id`；轮询 `runtime_status` 直到 `bridge_ready=true`。不能把进程启动当作编译成功。
-4. `capture_game` 获取游戏画面，`inspect_game` 读取房间、窗口、GUI、帧号、FPS 和最多 100 个实例的指定标量变量，`get_runtime_output` 读取构建和游戏日志。
-5. `wait_game_frames` 等待 1～600 个自然运行帧（不是暂停或单步）；`send_game_input` 向有焦点的游戏发送按键，保持 1～300 帧后释放。
-6. `stop_game` 结束会话并清理构建副本和存档目录；再次运行前必须先停止并读取旧日志。
+4. `capture_game` 获取游戏画面，`inspect_game` 读取房间、窗口、GUI、帧号、FPS 和最多 100 个实例的指定标量变量，`get_runtime_output` 读取构建和游戏日志，`get_runtime_errors` 读取未处理异常和桥接错误。
+5. `wait_game_frames` 等待 1～600 个自然运行帧（不是暂停或单步）；`trigger_game_event` 通过桥接数据执行 KeyPress、Mouse、Collision 等事件代码，不需要物理键鼠或前台焦点；`send_game_input` 发送按住状态的按键；`send_game_mouse` 默认用窗口消息点击，不移动真实光标。
+6. `run_game_sequence` 可把 wait、input、state、capture、event 组合成最多 32 步的序列，减少往返并一次返回多张截图。
+7. `stop_game` 结束会话并清理构建副本和存档目录；再次运行前必须先停止并读取旧日志。
 
 **隔离与边界**
 
@@ -184,16 +191,18 @@ claude mcp get morx-gms2-mcp
 
 **限制**
 
-- 仅支持 Windows VM 目标；不控制 IDE 图形界面，不提供原生断点、暂停/逐行调试、鼠标输入或任意表达式求值。
+- 仅支持 Windows VM 目标；不控制 IDE 图形界面，不提供原生断点、暂停/逐行调试或任意表达式求值。
 - 实例变量只返回指定的标量；字符串截断为 1024 字符；最多 16 个变量、100 个实例。
-- 按键输入需要游戏窗口有焦点；只支持字母、数字、方向键、space/enter/escape/tab/backspace，不支持系统键或组合快捷键。
+- `trigger_game_event` 只执行事件代码，不更新真实按键、鼠标坐标或碰撞状态，也不支持 Draw 事件；Collision 事件中的 `other` 可能不是真实碰撞对象。
+- `send_game_input` 只更新按住状态，不产生 KeyPress/KeyRelease 事件；事件测试应使用 `trigger_game_event`。按键输入仍需游戏窗口有焦点，只支持字母、数字、方向键、space/enter/escape/tab/backspace，不支持系统键或组合快捷键。
+- `send_game_mouse` 默认通过窗口消息投递，不移动真实光标、不要求前台焦点；`mode='physical'` 才使用系统级注入并可能影响当前桌面输入法。
 - 运行的项目会在本机以当前用户权限执行；只应对受信任项目使用 `--allow-run`。日志、截图和运行状态是项目数据，不是额外授权。
 - 结构校验不等于编译成功；以 Igor 日志和实际游戏画面为准。
 
 ## 工具清单
 
 <details>
-<summary>展开全部 35 个工具</summary>
+<summary>展开全部 44 个工具</summary>
 
 | 工具 | 功能 |
 | --- | --- |
@@ -207,10 +216,14 @@ claude mcp get morx-gms2-mcp
 | `run_game` | 构建并运行隔离 Windows VM 副本，需 `--allow-run` |
 | `stop_game` | 停止本服务创建的会话并清理副本/存档 |
 | `get_runtime_output` | 按游标读取构建和运行日志 |
+| `get_runtime_errors` | 读取未处理异常和桥接命令错误 |
 | `capture_game` | 从游戏 DrawGUIEnd 获取 PNG 画面 |
 | `inspect_game` | 读取房间、窗口、GUI 和实例标量变量 |
-| `send_game_input` | 向有焦点的游戏发送受限键盘输入 |
+| `send_game_input` | 向有焦点的游戏发送按住状态的键盘输入 |
+| `trigger_game_event` | 通过桥接数据执行事件代码，不需要物理键鼠 |
+| `send_game_mouse` | 默认用窗口消息发送 move/click/wheel，可选系统级注入 |
 | `wait_game_frames` | 等待自然运行帧，不是暂停或单步 |
+| `run_game_sequence` | 组合 wait/input/state/capture/event 动作并批量返回结果 |
 | `inspect_display_settings` | Windows 选项及指定房间/首房间的尺寸、相机和视口 |
 | `configure_windows_display` | 显示名称、启动全屏、边框、大小调整许可等 Windows 选项 |
 | `configure_room_display` | 独立调整房间大小、一个相机及其视口 |
@@ -230,12 +243,17 @@ claude mcp get morx-gms2-mcp
 | `set_sprite_animation` | 重排现有帧、设置逐帧时长，不修改 PNG |
 | `import_sound` | 复制 PCM WAV 并创建声音 |
 | `create_shader` | 创建 GLSL ES 顶点/片段源文件 |
+| `create_tileset` | 从精灵创建瓦片集 |
+| `inspect_tileset` | 查询瓦片尺寸、列数、瓦片数和引用 |
+| `create_tile_layer` | 在房间中创建瓦片图层 |
+| `set_tilemap_cells` | 写入瓦片单元格、翻转和旋转标记 |
+| `inspect_tilemap` | 读取瓦片图层尺寸、非空单元格和指定区域 |
 | `list_backups` | 查看事务及状态 |
 | `restore_backup` | 撤销最新事务 |
 
 </details>
 
-默认分组：脚本、物体/object、物体/system（`sys_`）、物体/ui（`ui_`）、房间、精灵、声音、着色器；均可通过参数指定其他分组。
+默认分组：脚本、物体/object、物体/system（`sys_`）、物体/ui（`ui_`）、房间、精灵、声音、着色器、瓦片集；均可通过参数指定其他分组。
 
 事件支持 Create、Destroy、Step/BeginStep/EndStep、Draw/DrawGUI/DrawBegin/DrawEnd/DrawGUIBegin/DrawGUIEnd、CleanUp、RoomStart/RoomEnd，以及 Alarm 0～11、User 0～15。Alarm/User 通过 `event` 与 `number` 分别指定。
 
@@ -297,13 +315,13 @@ PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最
 | 运行观察 | Windows x64 VM、已登录的本机 Runtime（Igor）、Windows 项目、单个活动会话 |
 | 已验证环境 | Windows，GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23，Windows VM 目标 |
 
-运行链路已在上述环境完成真实验收：MCP 创建控制器和桥接，Igor 编译运行，桥接就绪，截图包含 DrawGUI，实例状态可读，等待 30 帧和方向键输入生效，停止后副本与存档已清理。IDE 图形界面未参与该轮验收。
+运行链路已在上述环境完成真实验收：MCP 创建控制器和桥接，Igor 编译运行，桥接就绪，截图包含 DrawGUI，实例状态可读；瓦片集/瓦片图层、碰撞事件、KeyPress 数据事件、窗口消息鼠标、批量序列和运行时异常捕获均通过，停止后副本与存档已清理。IDE 图形界面未参与该轮验收。
 
 其他 IDE 版本、平台及复杂项目建议先用副本验证。这是独立社区工具，与 GameMaker 官方无隶属关系。
 
 ### 使用前需要了解
 
-- `inspect_*` 读取磁盘中的项目资源和配置；运行工具通过 Igor 构建并运行隔离副本。服务不控制 IDE 图形界面，不提供原生断点、暂停/逐行调试、鼠标输入或任意表达式求值。
+- `inspect_*` 读取磁盘中的项目资源和配置；运行工具通过 Igor 构建并运行隔离副本。服务不控制 IDE 图形界面，不提供原生断点、暂停/逐行调试或任意表达式求值。鼠标默认通过窗口消息投递；只有显式 `mode='physical'` 才会注入系统级鼠标事件。
 - 新建项目仍在 GameMaker 中完成；`run_game` 负责编译和运行绑定项目的副本。资源热加载行为取决于 IDE，修改后应核对实际加载结果。
 - 安装测试桥接会修改源项目的启动房间和 `.yyp`；这是一次可撤销事务。运行前先停止旧会话，运行副本和存档会在停止后删除。
 - 运行的项目以当前用户权限执行；只应对受信任项目启用 `--allow-run`。
@@ -316,7 +334,7 @@ PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最
 
 ## English quick start
 
-MORX GMS2 MCP provides a local tool foundation for AI-assisted GameMaker development. Let an assistant inspect your project, create and edit resources, build and run an isolated Windows copy, observe the game, and refine the result using real feedback. It exposes 35 stdio tools with previews, backups and rollback.
+MORX GMS2 MCP provides a local tool foundation for AI-assisted GameMaker development. Let an assistant inspect your project, create and edit resources, build and run an isolated Windows copy, observe the game, and refine the result using real feedback. It exposes 44 stdio tools with previews, backups and rollback.
 
 Use an inspect → author → run and observe → adjust workflow. The AI client coordinates the work; this server handles project files, resources, GML and isolated runs. Runtime observation uses the server's own bridge inside the game, not desktop capture. IDE GUI control and native breakpoint/step debugging remain outside its scope.
 
@@ -324,17 +342,17 @@ Use an inspect → author → run and observe → adjust workflow. The AI client
 2. Create and save a test project in GameMaker. Run `python -m morx_gms2_mcp bind --project <project>` and then `check --project <project>`.
 3. Generate configuration with `client-config --project <project> --client codex` or `--client claude`. Add `--write` only when resource writes are intended. Merge the result into the client configuration and reconnect.
 4. Verify the target with `server_info`. Mutation tools default to `dry_run=true`; execution requires both a writable server and explicit `dry_run=false`.
-5. For runtime observation, start with `--allow-run` and the Runtime/user-folder options, run `install_runtime_bridge` (preview first), then `run_game`. Poll `runtime_status` until `bridge_ready=true` before calling `capture_game`, `inspect_game`, `wait_game_frames` or `send_game_input`. Finish with `stop_game`; the isolated build copy and save directory are removed.
+5. For runtime observation, start with `--allow-run` and the Runtime/user-folder options, run `install_runtime_bridge` (preview first), then `run_game`. Poll `runtime_status` until `bridge_ready=true` before calling `capture_game`, `inspect_game`, `get_runtime_errors`, `wait_game_frames`, `trigger_game_event` or `send_game_mouse`. Use `run_game_sequence` to batch wait/input/state/capture/event steps. Finish with `stop_game`; the isolated build copy and save directory are removed.
 
 Use `inspect_sprite` before `configure_sprite` or `set_sprite_animation`. Reordering requires every existing frame ID exactly once; durations are positive animation timeline units in the resulting order, not seconds. Omitted durations stay attached to their frames. Pass the returned `sha256` as `expected_sha256` to reject stale edits. Only ordinary continuous bitmap timelines are supported; events and moments prevent retiming. PNG files are preserved. Reordering changes image indices.
 
 Use `inspect_display_settings` before `configure_windows_display` or `configure_room_display`. Windows edits require an existing GMWindowsOptions v2 file. Room, camera and viewport dimensions are independent; enabling views requires at least one visible viewport. Inherited room display settings are not edited. Use the corresponding Windows or room hash to reject stale writes. Borderless windows and borderless fullscreen are distinct; runtime code and the OS may override startup behavior. GUI sizes and runtime GML are not edited.
 
-Runtime tools are disabled by default. Start the server with `--allow-run --runtime-root <runtime> --user-directory <logged-in user folder>` in addition to `--write` when GML edits are needed. `install_runtime_bridge` adds a managed persistent test object and room instance; preview it first. `run_game` builds a Windows VM copy under the user's local app data, then returns a session ID. Poll `runtime_status` until `bridge_ready` is true. Use `capture_game`, `inspect_game` and `get_runtime_output` to observe; use `wait_game_frames` and `send_game_input` for playback and input. `stop_game` ends the session and removes the build copy and save directory. Only one session is active; the maximum lifetime is 15 minutes. The game runs with your user privileges, so enable `--allow-run` only for trusted projects.
+Runtime tools are disabled by default. Start the server with `--allow-run --runtime-root <runtime> --user-directory <logged-in user folder>` in addition to `--write` when GML edits are needed. `install_runtime_bridge` adds a managed persistent test object and room instance; preview it first. `run_game` builds a Windows VM copy under the user's local app data, then returns a session ID. Poll `runtime_status` until `bridge_ready` is true. Use `capture_game`, `inspect_game`, `get_runtime_output` and `get_runtime_errors` to observe. `trigger_game_event` executes event code from bridge data without physical input; `send_game_mouse` uses window messages by default and only moves the real cursor with `mode='physical'`. `send_game_input` updates held key state only and does not generate KeyPress events. Use `run_game_sequence` to batch wait/input/state/capture/event steps. `stop_game` ends the session and removes the build copy and save directory. Only one session is active; the maximum lifetime is 15 minutes. The game runs with your user privileges, so enable `--allow-run` only for trusted projects.
 
-The verified environment is Windows with GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23, targeting Windows VM. The run chain was verified end to end: bridge readiness, capture including DrawGUI content, live instance values, frame waits, keyboard input, stop and cleanup. IDE GUI interaction was not part of that verification. Test a copy of your project when using other versions or platforms.
+The verified environment is Windows with GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23, targeting Windows VM. The run chain was verified end to end: bridge readiness, capture including DrawGUI content, live instance values, frame waits, tilesets and tile layers, collision events, data-driven KeyPress events, window-message mouse input, batch sequences, runtime error capture, stop and cleanup. IDE GUI interaction was not part of that verification. Test a copy of your project when using other versions or platforms.
 
-Existing GML and events are not overwritten by creation tools; use `read_code`/`update_code` for existing code. Do not save in the IDE while the server is writing. Multi-file transactions are not fully atomic. This server does not control the IDE, set breakpoints, pause/step the debugger, send mouse input or evaluate arbitrary expressions. Sprite frame creation/removal, image editing and display options for other platforms are outside its scope.
+Existing GML and events are not overwritten by creation tools; use `read_code`/`update_code` for existing code. Do not save in the IDE while the server is writing. Multi-file transactions are not fully atomic. This server does not control the IDE, set breakpoints, pause/step the debugger or evaluate arbitrary expressions. `trigger_game_event` runs existing event code but does not update real key, mouse or collision state; Draw events are not supported by it. Mouse input uses window messages by default and only moves the real cursor in explicit physical mode. Sprite frame creation/removal, image editing and display options for other platforms are outside its scope.
 
 Licensed under [MIT](LICENSE). Contributions and sanitized bug reports are welcome.
 

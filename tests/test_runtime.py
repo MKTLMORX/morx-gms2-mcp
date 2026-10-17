@@ -332,6 +332,161 @@ class RuntimeTests(ProjectFixture):
             with self.assertRaises(ValueError):
                 self.project.add_event('obj_events', 'Alarm', '//', number)
 
+    def sequence_responder(self, commands):
+        seen = []
+        def worker():
+            deadline = time.monotonic() + 10
+            for command in commands:
+                while time.monotonic() < deadline:
+                    try:
+                        request = bounded_json(self.runtime._file('request.json'))
+                    except (OSError, ValueError):
+                        time.sleep(.005)
+                        continue
+                    if request.get('command') != command:
+                        time.sleep(.005)
+                        continue
+                    seen.append(command)
+                    if command == 'capture':
+                        Image.new('RGB', (64, 64), (10, 20, 30)).save(
+                            self.runtime._file('capture_' + request['request'] + '.png'))
+                    atomic_json(self.runtime._file('response.json'), {'session': self.session_id,
+                        'request': request['request'], 'ok': True, 'data': {'value': 42}, 'frame': 7})
+                    break
+                else:
+                    raise AssertionError('No bridge request: ' + command)
+        thread = threading.Thread(target=worker)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        return seen
+
+    def test_mouse_preview_validation_and_injection(self):
+        self.launch()
+        self.ready()
+        window = type('FakeWindow', (), {'handle': 1, 'pid': 2, 'title': 'MORX_Run_x',
+                                         'width': 640, 'height': 360})()
+        with patch('morx_gms2_mcp.win_mouse.find_game_window', return_value=window), \
+             patch('morx_gms2_mcp.win_mouse.send_mouse_message',
+                   return_value={'screen_x': 30, 'screen_y': 40}) as message, \
+             patch('morx_gms2_mcp.win_mouse.send_mouse',
+                   return_value={'screen_x': 10, 'screen_y': 20}) as physical:
+            preview = self.runtime.mouse(self.session_id, 'click', 100, 200)
+            self.assertTrue(preview['dry_run'])
+            self.assertEqual(preview['mode'], 'message')
+            message.assert_not_called()
+            physical.assert_not_called()
+            result = self.runtime.mouse(self.session_id, 'click', 100, 200, dry_run=False)
+            message.assert_called_once_with(window, 'click', 100, 200, 'left', 0, 50)
+            physical.assert_not_called()
+            self.assertEqual(result['cursor'], {'screen_x': 30, 'screen_y': 40})
+            self.assertEqual(result['window'], {'width': 640, 'height': 360})
+            result = self.runtime.mouse(self.session_id, 'click', 100, 200,
+                                        mode='physical', dry_run=False)
+            physical.assert_called_once_with(window, 'click', 100, 200, 'left', 0, 50)
+            self.assertEqual(result['cursor'], {'screen_x': 10, 'screen_y': 20})
+            for args, kwargs in [(('move', 640, 0), {}), (('move', -1, 0), {}),
+                                 (('wheel',), {'delta': 0}), (('click', 1, 1), {'button': 'x'}),
+                                 (('click', 1, 1), {'hold_ms': 0}), (('move',), {}),
+                                 (('move', 1, 1), {'mode': 'other'})]:
+                with self.assertRaises(ValueError):
+                    self.runtime.mouse(self.session_id, *args, dry_run=False, **kwargs)
+            with self.assertRaises(ValueError):
+                self.runtime.mouse('another', 'move', 1, 1, dry_run=False)
+
+    def test_trigger_event_preview_and_dispatch(self):
+        self.launch()
+        self.ready()
+        preview = self.runtime.trigger_event(self.session_id, 'obj_probe', 'KeyPress', key='e')
+        self.assertTrue(preview['dry_run'])
+        self.assertEqual(preview['event_type'], 9)
+        self.assertEqual(preview['event_number'], 69)
+        self.assertFalse(self.runtime._file('request.json').exists())
+        seen = self.sequence_responder(['event'])
+        result = self.runtime.trigger_event(self.session_id, 'obj_probe', 'KeyPress',
+                                            key='e', dry_run=False)
+        self.assertTrue(result['ok'])
+        self.assertEqual(seen, ['event'])
+        preview = self.runtime.trigger_event(self.session_id, 'obj_probe', 'Collision',
+                                             collision_object='obj_other')
+        self.assertEqual(preview['event_type'], 4)
+        self.assertEqual(preview['collision_object'], 'obj_other')
+        for kwargs in ({'event': 'Draw'}, {'event': 'Mouse', 'number': 99},
+                       {'event': 'Keyboard', 'key': 'f1'}, {'event': 'Collision'},
+                       {'event': 'Alarm', 'number': 12}):
+            with self.assertRaises(ValueError):
+                self.runtime.trigger_event(self.session_id, 'obj_probe',
+                                           dry_run=False, **kwargs)
+        with self.assertRaises(ValueError):
+            self.runtime.trigger_event('another', 'obj_probe', 'KeyPress', key='e',
+                                       dry_run=False)
+
+    def test_sequence_preview_validation_and_execution(self):
+        self.launch()
+        self.ready()
+        steps = [{'action': 'input', 'keys': ['right'], 'frames': 3},
+                 {'action': 'event', 'object_name': 'obj_probe', 'event': 'KeyPress',
+                  'key': 'e'},
+                 {'action': 'wait', 'frames': 2},
+                 {'action': 'state', 'object_name': '', 'variables': ['value']},
+                 {'action': 'capture'}]
+        preview = self.runtime.run_sequence(self.session_id, steps)
+        self.assertTrue(preview['dry_run'])
+        self.assertEqual(preview['total_frames'], 5)
+        self.assertEqual(preview['captures'], 1)
+        self.assertFalse(self.runtime._file('request.json').exists())
+        seen = self.sequence_responder(['input', 'event', 'wait', 'state', 'capture'])
+        result = self.runtime.run_sequence(self.session_id, steps, dry_run=False)
+        self.assertTrue(result['ok'])
+        self.assertEqual(seen, ['input', 'event', 'wait', 'state', 'capture'])
+        self.assertEqual(len(result['results']), 5)
+        self.assertEqual(len(result['pictures']), 1)
+        self.assertEqual(result['results'][-1]['image_index'], 0)
+        for bad in ([], [{'action': 'wait', 'frames': 0}], [{'action': 'bogus'}],
+                    [{'action': 'capture'}] * 5,
+                    [{'action': 'wait', 'frames': 600}] * 4,
+                    [{'action': 'input', 'keys': ['win']}],
+                    [{'action': 'event', 'object_name': 'obj_probe', 'event': 'Draw'}]):
+            with self.assertRaises(ValueError):
+                self.runtime.run_sequence(self.session_id, bad)
+
+    def test_runtime_errors_are_session_bound_and_redacted(self):
+        self.launch()
+        self.runtime.redactions = ['C:\\Data\\Example']
+        atomic_json(self.runtime._file('errors.json'), {'session': 'old',
+            'errors': [{'message': 'stale'}]})
+        self.assertEqual(self.runtime.errors(self.session_id)['count'], 0)
+        atomic_json(self.runtime._file('errors.json'), {'session': self.session_id, 'errors': [
+            {'frame': 12, 'line': 7, 'stage': 'unhandled',
+             'message': 'boom at C:\\Data\\Example\\a.gml', 'long_message': 'long message',
+             'script': 'scr_probe', 'stacktrace': ['C:\\Data\\Example\\a.gml:7', 'scr_probe:1']}]})
+        result = self.runtime.errors(self.session_id)
+        self.assertEqual(result['count'], 1)
+        self.assertEqual(result['total'], 1)
+        self.assertEqual(result['errors'][0]['index'], 1)
+        self.assertEqual(result['errors'][0]['line'], 7)
+        self.assertNotIn('C:\\Data\\Example', json.dumps(result))
+        self.assertIn('[local-path]', json.dumps(result))
+        self.assertEqual(self.runtime.status()['error_count'], 1)
+        self.assertEqual(self.runtime.errors(self.session_id, after=1)['count'], 0)
+        with self.assertRaises(ValueError):
+            self.runtime.errors('another-session')
+
+    def test_malformed_or_oversized_errors_do_not_break_status(self):
+        self.launch()
+        atomic_json(self.runtime._file('errors.json'), {'session': self.session_id, 'errors': 'bad'})
+        self.assertEqual(self.runtime.status()['error_count'], 0)
+        self.runtime._file('errors.json').write_bytes(b'x' * (2 * 1024 * 1024 + 1))
+        self.assertEqual(self.runtime.status()['error_count'], 0)
+
+    def test_stop_returns_errors_before_cleanup(self):
+        self.launch()
+        atomic_json(self.runtime._file('errors.json'), {'session': self.session_id,
+            'errors': [{'stage': 'unhandled', 'message': 'boom'}]})
+        result = self.runtime.stop(self.session_id, dry_run=False)
+        self.assertEqual(result['error_count'], 1)
+        self.assertEqual(result['errors'][0]['message'], 'boom')
+        self.assertFalse(self.runtime._file('errors.json').exists())
+
     def test_response_errors_clear_pending(self):
         self.launch()
         self.runtime.pending = 'abc'
@@ -391,7 +546,7 @@ class RuntimeTests(ProjectFixture):
             server = build_server(self.root, runtime_options=self.options)
         async def verify():
             tools = await server.list_tools()
-            self.assertEqual(len(tools), 35)
+            self.assertEqual(len(tools), 44)
             for tool in tools:
                 if not tool.annotations.readOnlyHint:
                     self.assertTrue(tool.inputSchema['properties']['dry_run']['default'])

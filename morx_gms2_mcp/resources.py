@@ -13,30 +13,66 @@ from .display import WINDOWS_PATH, WINDOWS_FLAGS, VIEW_FIELDS, windows_settings,
 from .display import integer, boolean, title_check
 
 KINDS = {'scripts': 'GMScript', 'objects': 'GMObject', 'rooms': 'GMRoom',
-         'sprites': 'GMSprite', 'sounds': 'GMSound', 'shaders': 'GMShader'}
+         'sprites': 'GMSprite', 'sounds': 'GMSound', 'shaders': 'GMShader',
+         'tilesets': 'GMTileSet'}
 DEFAULT_GROUPS = {'scripts': '脚本', 'objects': '物体/object', 'rooms': '房间',
-                  'sprites': '精灵', 'sounds': '声音', 'shaders': '着色器'}
+                  'sprites': '精灵', 'sounds': '声音', 'shaders': '着色器',
+                  'tilesets': '瓦片集'}
 EVENTS = {'Create': (0, 0, 'Create'), 'Destroy': (1, 0, 'Destroy'),
           'Step': (3, 0, 'Step'), 'BeginStep': (3, 1, 'Step'), 'EndStep': (3, 2, 'Step'),
           'Draw': (8, 0, 'Draw'), 'DrawGUI': (8, 64, 'Draw'),
-          'DrawBegin': (8, 72, 'Draw'), 'DrawEnd': (8, 73, 'Draw'),
+          'DrawResize': (8, 65, 'Draw'), 'DrawBegin': (8, 72, 'Draw'), 'DrawEnd': (8, 73, 'Draw'),
           'DrawGUIBegin': (8, 74, 'Draw'), 'DrawGUIEnd': (8, 75, 'Draw'),
-          'CleanUp': (12, 0, 'CleanUp'), 'RoomStart': (7, 4, 'Other'), 'RoomEnd': (7, 5, 'Other')}
+          'DrawPre': (8, 76, 'Draw'), 'DrawPost': (8, 77, 'Draw'),
+          'CleanUp': (12, 0, 'CleanUp'), 'RoomStart': (7, 4, 'Other'), 'RoomEnd': (7, 5, 'Other'),
+          'GameStart': (7, 2, 'Other'), 'GameEnd': (7, 3, 'Other'),
+          'AnimationEnd': (7, 7, 'Other'), 'NoMoreLives': (7, 6, 'Other'),
+          'NoMoreHealth': (7, 9, 'Other'), 'EndOfPath': (7, 8, 'Other'),
+          'Outside': (7, 0, 'Other'), 'Boundary': (7, 1, 'Other')}
 EVENT_STEMS = {0: 'Create', 1: 'Destroy', 2: 'Alarm', 3: 'Step', 4: 'Collision', 5: 'Keyboard',
                6: 'Mouse', 7: 'Other', 8: 'Draw', 9: 'KeyPress', 10: 'KeyRelease', 12: 'CleanUp', 13: 'Gesture'}
+INPUT_EVENTS = {'Keyboard': 5, 'KeyPress': 9, 'KeyRelease': 10}
+MOUSE_EVENT_NUMBERS = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 50, 51, 52, 53, 54, 55, 56, 57, 58, 60, 61}
 
 
-def event_spec(event, number):
+def event_spec(event, number, collision_object=None):
     """事件名与编号统一映射；创建与读写共用，避免类型判断漂移。"""
     if type(number) is not int:
         raise ValueError('事件编号必须为整数')
+    if event == 'Collision':
+        if number != 0:
+            raise ValueError('Collision 事件编号必须为 0')
+        if not isinstance(collision_object, str) or not collision_object:
+            raise ValueError('Collision 事件须提供 collision_object')
+        name_check(collision_object)
+        return 4, 0, 'Collision', collision_object
+    if event in INPUT_EVENTS:
+        if not 1 <= number <= 255:
+            raise ValueError('键盘事件键码须为 1～255')
+        return INPUT_EVENTS[event], number, event, None
+    if event == 'Mouse':
+        if number not in MOUSE_EVENT_NUMBERS:
+            raise ValueError('不支持的鼠标事件编号；0～11、50～58、60～61')
+        return 6, number, 'Mouse', None
     if event == 'Alarm' and 0 <= number < 12:
-        return 2, number, 'Alarm'
+        return 2, number, 'Alarm', None
     if event == 'User' and 0 <= number < 16:
-        return 7, number + 10, 'Other'
+        return 7, number + 10, 'Other', None
     if event in EVENTS and number == 0:
-        return EVENTS[event]
+        return (*EVENTS[event], None)
     raise ValueError('不支持的事件或编号；Alarm 为 0～11，User 为 0～15')
+
+
+def trigger_spec(event, number=0, collision_object=None):
+    """运行期 event_perform 的映射；返回 (类型, 编号, 碰撞目标)。
+    与事件文件创建共用编号规则，但不允许 Draw：Draw 事件不能在外层绘制流程之外强制执行。
+    """
+    typ, num, _, collision = event_spec(event, number, collision_object)
+    if typ == 8:
+        raise ValueError('Draw 事件不能由运行期事件触发器执行')
+    if event == 'Collision':
+        return 4, 0, collision
+    return typ, num, None
 
 
 def name_check(name):
@@ -111,31 +147,40 @@ class Project(Storage):
     def metadata(self):
         return self.read(self.yyp.name)
 
-    def _code_path(self, edit, name, event, number):
+    def _code_path(self, edit, name, event, number, collision_object=None):
         ref, data = self._ref(edit, name)
-        if data['resourceType'] == 'GMScript' and event is None and number == 0:
+        if data['resourceType'] == 'GMScript' and event is None and number == 0 and collision_object is None:
             if data.get('isDnD'):
                 raise ValueError('不修改 GML Visual 脚本')
             return f'scripts/{name}/{name}.gml'
         if data['resourceType'] != 'GMObject' or event is None:
             raise ValueError('须指定脚本，或物体及其已有事件')
-        typ, num, stem = event_spec(event, number)
-        events = [e for e in data['eventList'] if e['eventType'] == typ and e['eventNum'] == num]
+        typ, num, stem, collision = event_spec(event, number, collision_object)
+        if typ == 4:
+            target = self._ref(edit, collision, 'objects')[0]
+            events = [e for e in data['eventList'] if e['eventType'] == 4
+                      and (e.get('collisionObjectId') or {}).get('path') == target['path']]
+            path = f'objects/{name}/Collision_{collision}.gml'
+        else:
+            events = [e for e in data['eventList'] if e['eventType'] == typ and e['eventNum'] == num]
+            path = f'objects/{name}/{stem}_{num}.gml'
         if len(events) != 1 or events[0].get('isDnD'):
             raise ValueError('事件不存在、不唯一或属于 GML Visual')
-        return f'objects/{name}/{stem}_{num}.gml'
+        return path
 
-    def read_code(self, name, event=None, number=0):
+    def read_code(self, name, event=None, number=0, collision_object=None):
         with self.lock:
             edit = Edit(self)
-            path = self._code_path(edit, name, event, number)
+            path = self._code_path(edit, name, event, number, collision_object)
             raw = edit.raw(path)
             if raw is None or len(raw) > 2 * 1024 * 1024:
                 raise ValueError('代码文件不存在或超过 2 MiB')
-            return {'name': name, 'event': event, 'number': number, 'path': path,
+            return {'name': name, 'event': event, 'number': number,
+                    'collision_object': collision_object, 'path': path,
                     'sha256': digest(raw), 'code': raw.decode('utf-8-sig')}
 
-    def update_code(self, name, code, expected_sha256, event=None, number=0, dry_run=True):
+    def update_code(self, name, code, expected_sha256, event=None, number=0,
+                    collision_object=None, dry_run=True):
         if not isinstance(code, str) or '\0' in code or len(code.encode('utf-8')) > 2 * 1024 * 1024:
             raise ValueError('GML 须为不含 NUL、最多 2 MiB 的 UTF-8 文本')
         if not isinstance(expected_sha256, str) or not re.fullmatch('[a-f0-9]{64}', expected_sha256):
@@ -145,7 +190,7 @@ class Project(Storage):
             raise ValueError('不通过代码编辑工具修改受管理的测试桥接')
         with self.lock:
             edit = Edit(self)
-            path = self._code_path(edit, name, event, number)
+            path = self._code_path(edit, name, event, number, collision_object)
             raw = edit.raw(path)
             if raw is None or digest(raw) != expected_sha256:
                 raise ValueError('代码已被修改或不存在，请重新 read_code 并预览')
@@ -544,16 +589,28 @@ class Project(Storage):
             edit.save(ref['path'], data)
             return edit.commit(dry_run)
 
-    def add_event(self, name, event, code, number=0, dry_run=False):
-        typ, num, stem = event_spec(event, number)
+    def add_event(self, name, event, code, number=0, collision_object=None, dry_run=False):
+        typ, num, stem, collision = event_spec(event, number, collision_object)
         with self.lock:
             edit = Edit(self)
             ref, obj = self._ref(edit, name, 'objects')
-            gml = f'objects/{name}/{stem}_{num}.gml'
-            if any(e['eventType'] == typ and e['eventNum'] == num for e in obj['eventList']):
+            target = None
+            if typ == 4:
+                if collision == name:
+                    raise ValueError('Collision 事件不能以自身为目标')
+                target = self._ref(edit, collision, 'objects')[0]
+                gml = f'objects/{name}/Collision_{collision}.gml'
+                duplicate = any(e['eventType'] == 4 and
+                    (e.get('collisionObjectId') or {}).get('path') == target['path']
+                    for e in obj['eventList'])
+            else:
+                gml = f'objects/{name}/{stem}_{num}.gml'
+                duplicate = any(e['eventType'] == typ and e['eventNum'] == num
+                                for e in obj['eventList'])
+            if duplicate:
                 raise ValueError('事件已存在；不会覆盖')
             obj['eventList'].append(schemas.typed('GMEvent', 'v1', **{'%Name': ''}, name='',
-                collisionObjectId=None, eventNum=num, eventType=typ, isDnD=False))
+                collisionObjectId=target, eventNum=num, eventType=typ, isDnD=False))
             edit.new(gml, code.encode('utf-8'))
             edit.save(ref['path'], obj)
             return edit.commit(dry_run)
@@ -764,6 +821,177 @@ class Project(Storage):
             edit.new(f'shaders/{name}/{name}.vsh', vertex_code.encode('utf-8'))
             edit.new(f'shaders/{name}/{name}.fsh', fragment_code.encode('utf-8'))
             return edit.commit(dry_run)
+
+    def create_tileset(self, name, sprite, tile_width, tile_height, group='瓦片集', dry_run=False):
+        name_check(name)
+        integer(tile_width, 'tile_width', 1, 8192)
+        integer(tile_height, 'tile_height', 1, 8192)
+        with self.lock:
+            edit = Edit(self)
+            sprite_ref, sprite_data = self._ref(edit, sprite, 'sprites')
+            if len(sprite_data.get('frames', [])) != 1:
+                raise ValueError('瓦片集只支持单帧精灵')
+            width, height = sprite_data.get('width'), sprite_data.get('height')
+            if type(width) is not int or type(height) is not int:
+                raise ValueError('精灵尺寸无效')
+            if width % tile_width or height % tile_height:
+                raise ValueError('精灵宽高须能被瓦片宽高整除')
+            count = (width // tile_width) * (height // tile_height)
+            if count < 1 or count > 262144:
+                raise ValueError('瓦片数量须为 1～262144')
+            data = schemas.tileset(name, sprite_ref, width, height, tile_width, tile_height)
+            self._register(edit, 'tilesets', name, data, group)
+            return edit.commit(dry_run)
+
+    def inspect_tileset(self, name):
+        with self.lock:
+            ref, data = self._ref(Edit(self), name, 'tilesets')
+            return {'name': name, 'path': ref['path'],
+                    'sha256': digest(self.path(ref['path']).read_bytes()),
+                    'sprite': data.get('spriteId'), 'tile_width': data.get('tileWidth'),
+                    'tile_height': data.get('tileHeight'), 'columns': data.get('out_columns'),
+                    'tile_count': data.get('tile_count'),
+                    'sprite_no_export': data.get('spriteNoExport')}
+
+    def create_tile_layer(self, room, layer, tileset, width=None, height=None,
+                          x=0, y=0, depth=0, dry_run=False):
+        name_check(layer)
+        integer(x, 'x', 0, 32768)
+        integer(y, 'y', 0, 32768)
+        if type(depth) is not int:
+            raise ValueError('图层 depth 必须为整数')
+        with self.lock:
+            edit = Edit(self)
+            ref, data = self._ref(edit, room, 'rooms')
+            tileset_ref, tileset_data = self._ref(edit, tileset, 'tilesets')
+            if any(item['name'].casefold() == layer.casefold() for item in walk_layers(data['layers'])):
+                raise ValueError('房间已存在同名图层')
+            tile_width, tile_height = tileset_data.get('tileWidth'), tileset_data.get('tileHeight')
+            if type(tile_width) is not int or type(tile_height) is not int:
+                raise ValueError('瓦片集的瓦片尺寸无效')
+            settings = data.get('roomSettings') or {}
+            if width is None:
+                if type(settings.get('Width')) is not int:
+                    raise ValueError('房间缺少尺寸，须显式提供 width')
+                width = (settings['Width'] + tile_width - 1) // tile_width
+            if height is None:
+                if type(settings.get('Height')) is not int:
+                    raise ValueError('房间缺少尺寸，须显式提供 height')
+                height = (settings['Height'] + tile_height - 1) // tile_height
+            integer(width, 'width', 1, 1024)
+            integer(height, 'height', 1, 1024)
+            if width * height > 262144:
+                raise ValueError('瓦片图层超过 262144 格')
+            data['layers'].append(schemas.tile_layer(layer, tileset_ref, width, height, x, y, depth))
+            edit.save(ref['path'], data)
+            return edit.commit(dry_run)
+
+    def inspect_tilemap(self, room, layer=None, x=0, y=0, width=None, height=None,
+                        include_cells=False):
+        integer(x, 'x', 0, 32768)
+        integer(y, 'y', 0, 32768)
+        with self.lock:
+            ref, data = self._ref(Edit(self), room, 'rooms')
+            layers = [item for item in walk_layers(data['layers'])
+                      if item.get('resourceType') == 'GMRTileLayer' and
+                      (layer is None or item['name'] == layer)]
+            if len(layers) != 1:
+                raise ValueError('须指定唯一的瓦片图层')
+            target = layers[0]
+            tiles = target.get('tiles') or {}
+            map_width, map_height = tiles.get('SerialiseWidth'), tiles.get('SerialiseHeight')
+            values = tiles.get('TileSerialiseData')
+            if type(map_width) is not int or type(map_height) is not int or \
+                    not isinstance(values, list) or len(values) != map_width * map_height:
+                raise ValueError('瓦片图层数据不完整')
+            width = map_width if width is None else width
+            height = map_height if height is None else height
+            integer(width, 'width', 1, 1024)
+            integer(height, 'height', 1, 1024)
+            if x + width > map_width or y + height > map_height:
+                raise ValueError('查询区域超出瓦片图层')
+            if width * height > 10000:
+                raise ValueError('查询区域超过 10000 格')
+            result = {'name': target['name'], 'tileset': target.get('tilesetId'),
+                      'x': target.get('x', 0), 'y': target.get('y', 0),
+                      'width': map_width, 'height': map_height, 'depth': target.get('depth', 0),
+                      'non_empty': sum(1 for value in values if value != schemas.EMPTY_TILE),
+                      'room_sha256': digest(self.path(ref['path']).read_bytes())}
+            if include_cells:
+                cells = []
+                for row in range(y, y + height):
+                    for column in range(x, x + width):
+                        value = values[row * map_width + column]
+                        if value == schemas.EMPTY_TILE:
+                            continue
+                        cells.append({'x': column, 'y': row, 'tile': value & 0x0FFFFFFF,
+                                      'flip_x': bool(value & schemas.TILE_FLIP_H),
+                                      'flip_y': bool(value & schemas.TILE_FLIP_V),
+                                      'rotate': bool(value & schemas.TILE_ROTATE)})
+                result['cells'] = cells
+            return result
+
+    def set_tilemap_cells(self, room, layer, cells, expected_sha256=None, dry_run=False):
+        if not isinstance(cells, list) or not 1 <= len(cells) <= 10000:
+            raise ValueError('cells 须包含 1～10000 个格子')
+        with self.lock:
+            edit = Edit(self)
+            ref, data = self._ref(edit, room, 'rooms')
+            raw = edit.raw(ref['path'])
+            if expected_sha256 is not None:
+                if not isinstance(expected_sha256, str) or not re.fullmatch('[a-f0-9]{64}', expected_sha256) \
+                        or digest(raw) != expected_sha256:
+                    raise ValueError('房间已被修改或哈希无效；请重新 inspect_tilemap')
+            layers = [item for item in walk_layers(data['layers'])
+                      if item.get('resourceType') == 'GMRTileLayer' and item['name'] == layer]
+            if len(layers) != 1:
+                raise ValueError('须指定唯一的瓦片图层')
+            target = layers[0]
+            tiles = target.get('tiles') or {}
+            map_width, map_height = tiles.get('SerialiseWidth'), tiles.get('SerialiseHeight')
+            values = tiles.get('TileSerialiseData')
+            if type(map_width) is not int or type(map_height) is not int or \
+                    not isinstance(values, list) or len(values) != map_width * map_height:
+                raise ValueError('瓦片图层数据不完整')
+            tileset_ref = target.get('tilesetId') or {}
+            if not isinstance(tileset_ref, dict) or not tileset_ref.get('name'):
+                raise ValueError('瓦片图层缺少瓦片集引用')
+            _, tileset_data = self._ref(edit, tileset_ref.get('name'), 'tilesets')
+            count = tileset_data.get('tile_count')
+            if type(count) is not int:
+                raise ValueError('瓦片集数量无效')
+            updated = 0
+            for cell in cells:
+                if not isinstance(cell, dict):
+                    raise ValueError('每个格子须为对象')
+                extra = set(cell) - {'x', 'y', 'tile', 'flip_x', 'flip_y', 'rotate'}
+                if extra:
+                    raise ValueError('格子包含未知参数：' + ', '.join(sorted(extra)))
+                column, row, tile = cell.get('x'), cell.get('y'), cell.get('tile')
+                if type(column) is not int or type(row) is not int:
+                    raise ValueError('格子坐标必须为整数')
+                if not 0 <= column < map_width or not 0 <= row < map_height:
+                    raise ValueError('格子坐标超出瓦片图层')
+                if type(tile) is not int or not 0 <= tile <= count:
+                    raise ValueError('瓦片索引须为 0～tile_count')
+                flags = 0
+                for key, flag in (('flip_x', schemas.TILE_FLIP_H),
+                                  ('flip_y', schemas.TILE_FLIP_V),
+                                  ('rotate', schemas.TILE_ROTATE)):
+                    if key in cell:
+                        if type(cell[key]) is not bool:
+                            raise ValueError(key + ' 必须为布尔值')
+                        if cell[key]:
+                            flags |= flag
+                value = schemas.EMPTY_TILE if tile == 0 else tile | flags
+                index = row * map_width + column
+                if values[index] != value:
+                    updated += 1
+                values[index] = value
+            edit.save(ref['path'], data)
+            result = edit.commit(dry_run)
+            result['updated'] = updated
+            return result
 
     def inspect_resource(self, name):
         with self.lock:

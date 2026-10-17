@@ -37,20 +37,26 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
     def server_info() -> dict:
         """查询服务版本、固定目标、写入模式、能力和局限。"""
         return {'version': __version__, 'project': str(project.yyp), 'writable': project.writable,
-            'transport': 'stdio', 'events': list(EVENTS) + ['Alarm (0..11)', 'User (0..15)'],
-            'resources': ['script', 'object', 'room', 'PNG sprite', 'PCM WAV sound', 'GLSL ES shader'],
+            'transport': 'stdio', 'events': list(EVENTS) + ['Alarm (0..11)', 'User (0..15)',
+                'Collision (collision_object=target)', 'Keyboard/KeyPress/KeyRelease (number=key code)',
+                'Mouse (number=event number)'],
+            'resources': ['script', 'object', 'room', 'PNG sprite', 'PCM WAV sound',
+                          'GLSL ES shader', 'tileset', 'tile layer'],
             'sprite_editing': ['查询普通位图动画', '播放速度及单位', '自定义原点', '帧重排', '逐帧时长'],
             'sprite_editing_ide_verified': True,
             'display_settings': ['Windows 显示名称与启动选项', '房间尺寸', '相机范围', '视口位置及尺寸'],
             'display_settings_ide_verified': True,
-            'workflow': ['资源制作', 'GML 读取及哈希保护修改', '隔离 Windows VM 构建运行', '游戏画面', '实例状态', '日志', '按键测试'],
+            'workflow': ['资源制作', 'GML 读取及哈希保护修改', '隔离 Windows VM 构建运行', '游戏画面',
+                         '实例状态', '日志', '数据事件触发', '按键测试'],
             'runtime_enabled': runtime.options.enabled,
             'runtime_verified': True,
-            'runtime_verification': 'Igor 2026.0.0.23 Windows VM：编译、桥接、截图、状态、等待、按键、停止与清理',
+            'runtime_verification': 'Igor 2026.0.0.23 Windows VM：编译、桥接、截图、状态、等待、事件触发、窗口消息鼠标、停止与清理',
             'runtime_ide_verified': False,
             'limitations': ['不操控 IDE', '不支持删除或重命名资源', '新建工具不覆盖已有资源；已有代码须用 update_code',
                 '不创建字体、路径、时间线、序列或扩展资源', '多个文件整体非操作系统级原子事务',
-                '不增删精灵帧或编辑图像；复杂动画时间轴拒绝修改', '尚不提供原生断点、逐行调试或鼠标输入'],
+                '不增删精灵帧或编辑图像；复杂动画时间轴拒绝修改',
+                '不提供原生断点或逐行调试；event_perform 只执行事件代码，不更新真实按键/鼠标/碰撞状态',
+                '鼠标默认通过窗口消息投递；physical 模式才移动真实光标并抢焦点；Draw 事件不能由触发器执行'],
             'verified_ide': '2026.0.0.16', 'verified_runtime': '2026.0.0.23'}
 
     @mcp.tool(annotations=read)
@@ -64,15 +70,19 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
         return project.inspect_resource(name)
 
     @mcp.tool(annotations=read)
-    def read_code(name: str, event: str | None = None, number: int = 0) -> dict:
-        """读取已注册脚本或物体事件的 GML 和 SHA-256；物体须指定 event。"""
-        return project.read_code(name, event, number)
+    def read_code(name: str, event: str | None = None, number: int = 0,
+                  collision_object: str | None = None) -> dict:
+        """读取已注册脚本或物体事件的 GML 和 SHA-256；物体须指定 event。
+        Collision 事件用 collision_object 指定目标物体，Keyboard/Mouse 用 number 指定键码或鼠标事件编号。
+        """
+        return project.read_code(name, event, number, collision_object)
 
     @mcp.tool(annotations=change)
     def update_code(name: str, code: str, expected_sha256: str, event: str | None = None,
-                    number: int = 0, dry_run: bool = True) -> dict:
+                    number: int = 0, collision_object: str | None = None, dry_run: bool = True) -> dict:
         """按 read_code 返回的哈希修改已有 GML，保留编码及备份。拒绝过期写入；不代表已编译。"""
-        return project.update_code(name, code, expected_sha256, event, number, dry_run)
+        return project.update_code(name, code, expected_sha256, event, number,
+                                   collision_object, dry_run)
 
     @mcp.tool(annotations=add)
     def install_runtime_bridge(dry_run: bool = True) -> dict:
@@ -103,6 +113,13 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
         return runtime.output(session_id, after, limit)
 
     @mcp.tool(annotations=read)
+    def get_runtime_errors(session_id: str, after: int = 0, limit: int = 20) -> dict:
+        """读取游戏桥接记录的未处理异常和桥接命令错误，按 index 游标分页；最多保留 20 条。
+        异常发生在游戏进程内，可能不会出现在 Igor 日志中；停止会话前先读取，否则会随副本清理。
+        """
+        return runtime.errors(session_id, after, limit)
+
+    @mcp.tool(annotations=read)
     def capture_game(session_id: str):
         """从游戏 DrawGUIEnd 获取画面，返回 PNG 图像及帧号，预览最长边界 1280×720；不抓取桌面。"""
         result = runtime.request(session_id, 'capture')
@@ -119,14 +136,54 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
     @mcp.tool(annotations=change)
     def send_game_input(session_id: str, keys: list[str], frames: int = 1, dry_run: bool = True) -> dict:
         """向有焦点的游戏发送字母、数字、方向键等，保持 1～300 游戏帧后释放；不重复注入按下。
+        只更新按键按住状态，不产生 KeyPress/KeyRelease 事件；事件测试改用 trigger_game_event。
         不支持系统键或组合快捷键；失焦释放。输入可能影响游戏进程，仅用于受信任的测试会话。
         """
         return runtime.input(session_id, keys, frames, dry_run)
+
+    @mcp.tool(annotations=change)
+    def trigger_game_event(session_id: str, object_name: str, event: str, number: int = 0,
+                           collision_object: str | None = None, key: str | int | None = None,
+                           instance_id: int | None = None, limit: int = 32,
+                           dry_run: bool = True) -> dict:
+        """通过桥接数据执行目标物体的事件代码（event_perform），不需要物理键鼠或前台焦点。
+        支持 Keyboard/KeyPress/KeyRelease、Mouse、Collision、Alarm、User、Step/Other 等；
+        Keyboard 类可用 key 指定名称或键码，Collision 用 collision_object 指定目标。
+        省略 instance_id 时最多触发该物体 limit 个实例；Draw 事件不支持。
+        只执行事件代码，不更新真实按键、鼠标坐标或碰撞状态。
+        """
+        return runtime.trigger_event(session_id, object_name, event, number,
+                                     collision_object, key, instance_id, limit, dry_run)
+
+    @mcp.tool(annotations=change)
+    def send_game_mouse(session_id: str, action: str, x: int | None = None, y: int | None = None,
+                        button: str = 'left', delta: int = 0, hold_ms: int = 50,
+                        mode: str = 'message', dry_run: bool = True) -> dict:
+        """向受管游戏窗口发送鼠标 move/click/wheel；x/y 为窗口客户区像素。
+        默认 mode='message' 向窗口投递消息，不移动真实光标、不要求前台焦点；
+        mode='physical' 才使用系统级注入（会移动光标并抢焦点）。wheel 的 delta 为 -5～5 格。
+        仅用于受信任的测试会话；不向其他窗口或后台进程发送输入。
+        """
+        return runtime.mouse(session_id, action, x, y, button, delta, hold_ms, mode, dry_run)
 
     @mcp.tool(annotations=read)
     def wait_game_frames(session_id: str, frames: int = 1) -> dict:
         """等待运行中的游戏经过 1～600 帧后应答；游戏继续正常运行，不是断点或暂停单步。"""
         return runtime.wait(session_id, frames)
+
+    @mcp.tool(annotations=change)
+    def run_game_sequence(session_id: str, steps: list[dict], max_images: int = 4,
+                          dry_run: bool = True):
+        """按顺序执行 1～32 个 wait/input/state/capture/event 动作；默认只预览。
+        event 动作通过桥接数据执行事件代码，不需要物理键鼠或前台焦点。
+        输入和等待按游戏自然帧计数，总帧数最多 1800；截图最多 max_images 张，按顺序作为图像返回。
+        中途失败会返回已完成步骤和失败步骤；长序列应在客户端工具超时内完成。
+        """
+        result = runtime.run_sequence(session_id, steps, dry_run, max_images)
+        pictures = result.pop('pictures', [])
+        blocks = [TextContent(type='text', text=json.dumps(result, ensure_ascii=False))]
+        blocks += [Image(data=picture, format='png').to_image_content() for picture in pictures]
+        return blocks
 
     @mcp.tool(annotations=read)
     def inspect_display_settings(room_name: str | None = None) -> dict:
@@ -180,9 +237,12 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
         return project.create('objects', name, group=group, dry_run=dry_run)
 
     @mcp.tool(annotations=add)
-    def add_object_event(object_name: str, event: str, code: str = '', number: int = 0, dry_run: bool = True) -> dict:
-        """新增事件，不覆盖；常用命名见 server_info，Alarm/User 使用 number。"""
-        return project.add_event(object_name, event, code, number, dry_run)
+    def add_object_event(object_name: str, event: str, code: str = '', number: int = 0,
+                         collision_object: str | None = None, dry_run: bool = True) -> dict:
+        """新增事件，不覆盖；常用命名见 server_info。
+        Collision 用 collision_object 指定目标物体；Keyboard/KeyPress/KeyRelease 和 Mouse 用 number。
+        """
+        return project.add_event(object_name, event, code, number, collision_object, dry_run)
 
     @mcp.tool(annotations=change)
     def configure_object(name: str, persistent: bool | None = None, visible: bool | None = None,
@@ -256,6 +316,41 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
                       group: str = '着色器', dry_run: bool = True) -> dict:
         """创建 GLSL ES 着色器及顶点、片段源文件，拒绝同名资源。"""
         return project.create_shader(name, vertex_code, fragment_code, group, dry_run)
+
+    @mcp.tool(annotations=add)
+    def create_tileset(name: str, sprite: str, tile_width: int, tile_height: int,
+                       group: str = '瓦片集', dry_run: bool = True) -> dict:
+        """用单帧精灵创建瓦片集；精灵宽高须能被瓦片宽高整除，图集按行优先排列。"""
+        return project.create_tileset(name, sprite, tile_width, tile_height, group, dry_run)
+
+    @mcp.tool(annotations=read)
+    def inspect_tileset(name: str) -> dict:
+        """查询瓦片集的精灵、瓦片尺寸、列数、瓦片数量及描述文件 SHA-256。"""
+        return project.inspect_tileset(name)
+
+    @mcp.tool(annotations=add)
+    def create_tile_layer(room_name: str, layer_name: str, tileset_name: str,
+                          width: int | None = None, height: int | None = None,
+                          x: int = 0, y: int = 0, depth: int = 0, dry_run: bool = True) -> dict:
+        """为房间增加瓦片图层；width/height 以瓦片计，省略时按房间尺寸向上取整。
+        新图层所有格子为空；随后用 set_tilemap_cells 绘制。"""
+        return project.create_tile_layer(room_name, layer_name, tileset_name,
+                                         width, height, x, y, depth, dry_run)
+
+    @mcp.tool(annotations=change)
+    def set_tilemap_cells(room_name: str, layer_name: str, cells: list[dict],
+                          expected_sha256: str | None = None, dry_run: bool = True) -> dict:
+        """批量设置瓦片格；每格为 {x,y,tile}，tile=0 清空，可带 flip_x/flip_y/rotate。
+        坐标以图层左上角为原点，最多 10000 格；建议传 inspect_tilemap 返回的 room_sha256。"""
+        return project.set_tilemap_cells(room_name, layer_name, cells, expected_sha256, dry_run)
+
+    @mcp.tool(annotations=read)
+    def inspect_tilemap(room_name: str, layer_name: str | None = None, x: int = 0, y: int = 0,
+                        width: int | None = None, height: int | None = None,
+                        include_cells: bool = False) -> dict:
+        """查询唯一瓦片图层的尺寸、瓦片集和哈希；可读取最多 10000 格的指定区域。
+        cells 只返回非空格，tile 为去掉翻转位后的索引。"""
+        return project.inspect_tilemap(room_name, layer_name, x, y, width, height, include_cells)
 
     @mcp.tool(annotations=read)
     def list_backups() -> dict:

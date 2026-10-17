@@ -135,6 +135,75 @@ class OperationTests(ProjectFixture):
         self.assertEqual(self.project.metadata()['RoomOrderNodes'][0]['roomId']['name'], 'rm_test')
         self.assertTrue(self.project.validate()['ok'], self.project.validate())
 
+    def test_collision_keyboard_mouse_and_other_events(self):
+        self.project.create('objects', 'obj_hit')
+        self.project.create('objects', 'obj_target')
+        self.project.add_event('obj_hit', 'Collision', 'hp -= 1;', collision_object='obj_target')
+        self.project.add_event('obj_hit', 'Keyboard', 'x += 1;', 65)
+        self.project.add_event('obj_hit', 'KeyPress', '//', 32)
+        self.project.add_event('obj_hit', 'KeyRelease', '//', 37)
+        self.project.add_event('obj_hit', 'Mouse', '//', 4)
+        self.project.add_event('obj_hit', 'GameStart', '//')
+        self.project.add_event('obj_hit', 'AnimationEnd', '//')
+        self.project.add_event('obj_hit', 'DrawPre', '//')
+        for path in ('Collision_obj_target.gml', 'Keyboard_65.gml', 'KeyPress_32.gml',
+                     'KeyRelease_37.gml', 'Mouse_4.gml', 'Other_2.gml', 'Other_7.gml', 'Draw_76.gml'):
+            self.assertTrue((self.root / 'objects/obj_hit' / path).exists(), path)
+        obj = self.project.read('objects/obj_hit/obj_hit.yy')
+        collision = [e for e in obj['eventList'] if e['eventType'] == 4][0]
+        self.assertEqual(collision['collisionObjectId']['name'], 'obj_target')
+        info = self.project.read_code('obj_hit', 'Collision', collision_object='obj_target')
+        self.assertEqual(info['path'], 'objects/obj_hit/Collision_obj_target.gml')
+        self.assertIn('hp -= 1', info['code'])
+        self.project.update_code('obj_hit', 'hp -= 2;', info['sha256'],
+                                 'Collision', collision_object='obj_target', dry_run=False)
+        self.assertEqual(self.project.read_code('obj_hit', 'Collision',
+            collision_object='obj_target')['code'], 'hp -= 2;')
+        with self.assertRaises(ValueError):
+            self.project.add_event('obj_hit', 'Collision', '//', collision_object='obj_target')
+        with self.assertRaises(ValueError):
+            self.project.add_event('obj_hit', 'Keyboard', '//', 65)
+        with self.assertRaises(ValueError):
+            self.project.add_event('obj_hit', 'Collision', '//', collision_object='obj_hit')
+        with self.assertRaises(ValueError):
+            self.project.add_event('obj_hit', 'Mouse', '//', 99)
+        with self.assertRaises(ValueError):
+            self.project.add_event('obj_hit', 'Keyboard', '//', 0)
+        self.assertTrue(self.project.validate()['ok'], self.project.validate())
+
+    def test_tileset_and_tile_layer(self):
+        sprite_path = self.root / 'tiles.png'
+        Image.new('RGBA', (32, 16), (20, 40, 60, 255)).save(sprite_path)
+        self.project.import_sprite('spr_tiles', [str(sprite_path)])
+        self.project.create_tileset('ts_test', 'spr_tiles', 16, 16, '瓦片集/测试')
+        info = self.project.inspect_tileset('ts_test')
+        self.assertEqual((info['columns'], info['tile_count']), (2, 2))
+        self.assertEqual((info['tile_width'], info['tile_height']), (16, 16))
+        self.project.create_tile_layer('Room1', 'Tiles', 'ts_test', width=4, height=3)
+        result = self.project.set_tilemap_cells('Room1', 'Tiles',
+            [{'x': 0, 'y': 0, 'tile': 1}, {'x': 1, 'y': 0, 'tile': 2, 'flip_x': True},
+             {'x': 3, 'y': 2, 'tile': 1, 'rotate': True}])
+        self.assertEqual(result['updated'], 3)
+        tilemap = self.project.inspect_tilemap('Room1', 'Tiles', include_cells=True)
+        self.assertEqual((tilemap['width'], tilemap['height']), (4, 3))
+        self.assertEqual(tilemap['non_empty'], 3)
+        self.assertEqual([cell['tile'] for cell in tilemap['cells']], [1, 2, 1])
+        self.assertTrue(tilemap['cells'][1]['flip_x'])
+        self.assertTrue(tilemap['cells'][2]['rotate'])
+        with self.assertRaises(ValueError):
+            self.project.set_tilemap_cells('Room1', 'Tiles', [{'x': 0, 'y': 0, 'tile': 1}],
+                                           expected_sha256='0' * 64)
+        for cells in ([{'x': 4, 'y': 0, 'tile': 1}], [{'x': 0, 'y': 0, 'tile': 3}],
+                      [{'x': 0, 'y': 0, 'tile': 1, 'flip_x': 1}],
+                      [{'x': 0, 'y': 0, 'tile': 1, 'bad': True}]):
+            with self.assertRaises(ValueError):
+                self.project.set_tilemap_cells('Room1', 'Tiles', cells)
+        with self.assertRaises(ValueError):
+            self.project.create_tile_layer('Room1', 'Tiles', 'ts_test', 4, 3)
+        with self.assertRaises(ValueError):
+            self.project.create_tileset('ts_bad', 'spr_tiles', 12, 16)
+        self.assertTrue(self.project.validate()['ok'], self.project.validate())
+
     def test_png_wav_shader_resources(self):
         paths = []
         for index in range(2):

@@ -1,6 +1,11 @@
 """GameMaker 2026 描述结构；只定义元数据，不依赖参考项目资源。"""
 from uuid import uuid4
 
+EMPTY_TILE = 0x80000000
+TILE_FLIP_H = 0x10000000
+TILE_FLIP_V = 0x20000000
+TILE_ROTATE = 0x40000000
+
 
 def typed(kind, version='', **fields):
     return {'$' + kind: version, 'resourceType': kind, 'resourceVersion': '2.0', **fields}
@@ -18,6 +23,68 @@ def instance(name, object_ref, x=0, y=0):
         colour=4294967295, frozen=False, hasCreationCode=False, ignore=False, imageIndex=0, imageSpeed=1.0,
         inheritCode=False, inheritedItemId=None, inheritItemSettings=False, isDnd=False,
         objectId=object_ref, properties=[], rotation=0.0, scaleX=1.0, scaleY=1.0, x=x, y=y)
+
+
+def tileset(name, sprite_ref, width, height, tile_width, tile_height):
+    columns, rows = width // tile_width, height // tile_height
+    count = columns * rows
+    # 派生属性按 GMTileSet 的声明顺序排列；基类字段放在派生字段之后。
+    return {
+        '$GMTileSet': 'v1',
+        '%Name': name,
+        'spriteId': sprite_ref,
+        'tileWidth': tile_width,
+        'tileHeight': tile_height,
+        'tilexoff': 0,
+        'tileyoff': 0,
+        'tilehsep': 0,
+        'tilevsep': 0,
+        'spriteNoExport': False,
+        'textureGroupId': {'name': 'Default', 'path': 'texturegroups/Default'},
+        'out_tilehborder': 2,
+        'out_tilevborder': 2,
+        'out_columns': columns,
+        'tile_count': count,
+        'autoTileSets': [],
+        'tileAnimationFrames': [],
+        'tileAnimationSpeed': 15.0,
+        'macroPageTiles': {'SerialiseWidth': 0, 'SerialiseHeight': 0, 'TileSerialiseData': []},
+        'parent': None,
+        'resourceVersion': '2.0',
+        'name': name,
+        'tags': [],
+        'resourceType': 'GMTileSet',
+    }
+
+
+def tile_layer(name, tileset_ref, width, height, x=0, y=0, depth=0):
+    # 与 2026 房间图层相同的基础字段顺序；瓦片字段紧跟 %Name。
+    return {
+        '$GMRTileLayer': '',
+        '%Name': name,
+        'tilesetId': tileset_ref,
+        'x': x,
+        'y': y,
+        'tiles': {'SerialiseWidth': width, 'SerialiseHeight': height,
+                  'TileSerialiseData': [EMPTY_TILE] * (width * height)},
+        'depth': depth,
+        'effectEnabled': True,
+        'effectType': None,
+        'gridX': 32,
+        'gridY': 32,
+        'hierarchyFrozen': False,
+        'inheritLayerDepth': False,
+        'inheritLayerSettings': False,
+        'inheritSubLayers': True,
+        'inheritVisibility': True,
+        'layers': [],
+        'name': name,
+        'properties': [],
+        'resourceType': 'GMRTileLayer',
+        'resourceVersion': '2.0',
+        'userdefinedDepth': False,
+        'visible': True,
+    }
 
 
 def room(name, width, height):

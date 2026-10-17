@@ -78,7 +78,9 @@ def validate(project):
                         check_ref(data.get(key), typ, path)
                     events = set()
                     for event in data['eventList']:
-                        identity = (event['eventType'], event['eventNum'])
+                        identity = (event['eventType'], event['eventNum'],
+                            (event.get('collisionObjectId') or {}).get('path')
+                            if event['eventType'] == 4 else None)
                         if identity in events:
                             errors.append('重复事件：' + path)
                         events.add(identity)
@@ -111,6 +113,33 @@ def validate(project):
                             instances.append(instance['name'])
                             check_ref(instance['objectId'], 'GMObject', path)
                         check_ref(layer.get('spriteId'), 'GMSprite', path)
+                        if layer.get('resourceType') == 'GMRTileLayer':
+                            if not layer.get('tilesetId'):
+                                errors.append('瓦片图层缺少瓦片集引用：' + path)
+                            else:
+                                check_ref(layer.get('tilesetId'), 'GMTileSet', path)
+                            tiles = layer.get('tiles') or {}
+                            map_width = tiles.get('SerialiseWidth')
+                            map_height = tiles.get('SerialiseHeight')
+                            values = tiles.get('TileSerialiseData')
+                            if type(map_width) is not int or type(map_height) is not int or \
+                                    map_width < 1 or map_height < 1 or \
+                                    not isinstance(values, list) or len(values) != map_width * map_height:
+                                errors.append('瓦片图层数据不完整：' + path)
+                            else:
+                                target = (layer.get('tilesetId') or {}).get('path')
+                                tileset = documents.get(target)
+                                count = tileset.get('tile_count') if tileset else None
+                                if type(count) is int:
+                                    for value in values:
+                                        if type(value) is not int:
+                                            errors.append('瓦片索引不是整数：' + path)
+                                            break
+                                        if value == 0x80000000:
+                                            continue
+                                        if not 0 <= (value & 0x0FFFFFFF) <= count:
+                                            errors.append('瓦片索引超出瓦片集：' + path)
+                                            break
                     order = [i['name'] for i in data['instanceCreationOrder']]
                     if sorted(instances) != sorted(order) or len(instances) != len(set(instances)):
                         errors.append('房间实例与创建顺序不一致：' + path)
@@ -142,6 +171,25 @@ def validate(project):
                                 for channel in key['Channels'].values():
                                     if channel['Id']['name'] not in frames or channel['Id']['path'] != path:
                                         errors.append('精灵动画帧引用错误：' + path)
+                    group = data.get('textureGroupId')
+                    if group and group['name'] not in {g['name'] for g in meta.get('TextureGroups', [])}:
+                        errors.append('纹理组引用错误：' + path)
+                elif kind == 'GMTileSet':
+                    sprite_ref = data.get('spriteId')
+                    check_ref(sprite_ref, 'GMSprite', path)
+                    tile_width, tile_height = data.get('tileWidth'), data.get('tileHeight')
+                    if type(tile_width) is not int or type(tile_height) is not int or \
+                            tile_width < 1 or tile_height < 1:
+                        errors.append('瓦片尺寸无效：' + path)
+                    else:
+                        sprite = documents.get((sprite_ref or {}).get('path'))
+                        if sprite:
+                            width, height = sprite.get('width'), sprite.get('height')
+                            if type(width) is not int or type(height) is not int or \
+                                    width % tile_width or height % tile_height:
+                                errors.append('精灵尺寸与瓦片尺寸不整除：' + path)
+                            elif data.get('tile_count') != (width // tile_width) * (height // tile_height):
+                                errors.append('瓦片数量与精灵尺寸不一致：' + path)
                     group = data.get('textureGroupId')
                     if group and group['name'] not in {g['name'] for g in meta.get('TextureGroups', [])}:
                         errors.append('纹理组引用错误：' + path)

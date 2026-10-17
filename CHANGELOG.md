@@ -1,5 +1,18 @@
 # 更新记录
 
+## 0.4.0.dev1 — 未发布
+
+- 运行桥接新增未处理异常捕获；`get_runtime_errors` 按游标返回最多 20 条异常或桥接命令错误，并在 `runtime_status`/`stop_game` 中给出数量。
+- 新增 `trigger_game_event`：通过桥接数据执行 Keyboard/KeyPress/KeyRelease、Mouse、Collision、Alarm、User、Step/Other 等事件代码，不需要物理键鼠或前台焦点；Draw 事件不支持。它只执行事件代码，不更新真实按键、鼠标坐标或碰撞状态。
+- 新增 `send_game_mouse`：默认 `mode='message'` 通过窗口消息投递 move/click/wheel，不移动真实光标、不要求前台焦点；`mode='physical'` 才使用系统级注入。
+- 新增 `run_game_sequence`：组合最多 32 个 wait/input/state/capture/event 动作，总帧数上限 1800，截图最多 4 张，失败时返回已完成步骤。
+- 事件制作支持碰撞目标 `collision_object`、Keyboard/KeyPress/KeyRelease、鼠标事件编号及 DrawResize、GameStart、GameEnd 等 Other 事件。
+- 新增瓦片集与瓦片图层：`create_tileset`、`inspect_tileset`、`create_tile_layer`、`set_tilemap_cells`、`inspect_tilemap`；支持空瓦片及翻转/旋转标记。
+- 桥接新增 `event` 命令，按 `object_name` 和可选 `instance_id` 选择目标；省略 `instance_id` 时最多触发 `limit` 个实例。
+- 修正模拟键盘的语义说明：`keyboard_key_press` 只更新按住状态，不产生 KeyPress/KeyRelease 事件；事件测试改用 `trigger_game_event`。
+- 真实验收通过：瓦片值、碰撞事件、KeyPress 数据事件、窗口消息鼠标、批量序列和未处理异常捕获；默认路径不再移动真实光标或发送系统级按键。
+- 自动测试增至 88 项并全部通过；工具数增至 44。
+
 ## 0.3.0.dev1 — 未发布
 
 - 新增运行观察：读取及哈希保护修改 GML、安装测试桥接、隔离 Windows VM 构建运行、游戏截图、实例状态、运行日志和按键测试，工具数增至 35。

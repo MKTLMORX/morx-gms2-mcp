@@ -100,6 +100,31 @@ mcp_snapshot = function(_args) {
         gui_width:display_get_gui_width(),gui_height:display_get_gui_height(),
         frame:mcp_frame,fps:fps_real,instances:rows,truncated:visible_total>array_length(rows)};
 };
+mcp_errors = [];
+mcp_text = function(_value,_limit) {
+    if (is_undefined(_value)) return "";
+    return string_copy(string(_value),1,_limit);
+};
+mcp_record_error = function(_stage,_message,_long,_script,_line,_stack) {
+    var item = {frame:mcp_frame,stage:_stage,message:mcp_text(_message,2048),
+        long_message:mcp_text(_long,4096),script:mcp_text(_script,1024),
+        line:is_real(_line)?_line:-1,stacktrace:[]};
+    if (is_array(_stack)) {
+        for (var i=0;i<array_length(_stack) && i<32;i++) {
+            array_push(item.stacktrace,mcp_text(_stack[i],1024));
+        }
+    }
+    array_push(mcp_errors,item);
+    if (array_length(mcp_errors)>20) array_delete(mcp_errors,0,array_length(mcp_errors)-20);
+    try { mcp_write("errors.json",{session:mcp_session.session,errors:mcp_errors}); } catch (err) {}
+};
+mcp_previous_error_handler = undefined;
+try {
+    mcp_previous_error_handler = exception_unhandled_handler(function(_exception) {
+        mcp_record_error("unhandled",_exception.message,_exception.longMessage,
+            _exception.script,_exception.line,_exception.stacktrace);
+    });
+} catch (err) {}
 mcp_write("ready.json",{session:mcp_session.session,bridge:mcp_session.bridge,frame:0});
 '''.replace('__KEY__', key)
     begin = r'''
@@ -163,20 +188,80 @@ try {
             mcp_pending = {request:request.request,frames:request.args.frames};
             mcp_until = mcp_frame + request.args.frames;
             break;
+        case "event":
+            var ev_name = request.args.object_name;
+            var ev_source = asset_get_index(ev_name);
+            if (ev_source == -1) {
+                mcp_reply(request.request,false,{error:"Object not found in running build"}); break;
+            }
+            var ev_type = request.args.event_type;
+            var ev_number = request.args.event_number;
+            if (!is_real(ev_type) || !is_real(ev_number)) {
+                mcp_reply(request.request,false,{error:"Invalid event"}); break;
+            }
+            if (ev_type == 4) {
+                if (!variable_struct_exists(request.args,"collision_object")) {
+                    mcp_reply(request.request,false,{error:"Collision target required"}); break;
+                }
+                ev_number = asset_get_index(request.args.collision_object);
+                if (ev_number == -1) {
+                    mcp_reply(request.request,false,{error:"Collision object not found"}); break;
+                }
+            }
+            var ev_targets = [];
+            if (variable_struct_exists(request.args,"instance_id")) {
+                var ev_instance = request.args.instance_id;
+                if (!instance_exists(ev_instance)) {
+                    mcp_reply(request.request,false,{error:"Instance not found"}); break;
+                }
+                if (ev_instance.object_index != ev_source) {
+                    mcp_reply(request.request,false,{error:"Instance does not match object"}); break;
+                }
+                array_push(ev_targets,ev_instance);
+            } else {
+                var ev_total = instance_number(ev_source);
+                if (ev_total<1) {
+                    mcp_reply(request.request,false,{error:"No instances of object"}); break;
+                }
+                var ev_cap = min(ev_total,request.args.limit);
+                for (var ev_i=0;ev_i<ev_cap;ev_i++) array_push(ev_targets,instance_find(ev_source,ev_i));
+            }
+            var ev_performed = 0;
+            for (var ev_j=0;ev_j<array_length(ev_targets);ev_j++) {
+                var ev_target = ev_targets[ev_j];
+                if (!instance_exists(ev_target)) continue;
+                with (ev_target) {
+                    event_perform_object(ev_source,ev_type,ev_number);
+                }
+                ev_performed++;
+            }
+            mcp_reply(request.request,true,{object_name:ev_name,event:request.args.event,
+                event_type:ev_type,event_number:ev_number,instances:ev_performed,frame:mcp_frame});
+            break;
         default: mcp_reply(request.request,false,{error:"Unsupported command"});
     }
-} catch (err) { mcp_release(); mcp_reply(request.request,false,{error:"Bridge command failed"}); }
+} catch (err) {
+    mcp_release();
+    mcp_record_error("bridge",err.message,err.longMessage,err.script,err.line,err.stacktrace);
+    mcp_reply(request.request,false,{error:"Bridge command failed: "+mcp_text(err.message,512)});
+}
 '''
     draw = r'''
 if (!is_undefined(mcp_capture)) {
     try {
         screen_save(mcp_directory+"capture_"+mcp_capture+".png");
         mcp_reply(mcp_capture,true,{frame:mcp_frame});
-    } catch (err) { mcp_reply(mcp_capture,false,{error:"Capture failed"}); }
+    } catch (err) {
+        mcp_record_error("capture",err.message,err.longMessage,err.script,err.line,err.stacktrace);
+        mcp_reply(mcp_capture,false,{error:"Capture failed: "+mcp_text(err.message,512)});
+    }
     mcp_capture = undefined;
 }
 '''
     cleanup = r'''
+if (variable_instance_exists(id,"mcp_previous_error_handler")) {
+    try { exception_unhandled_handler(mcp_previous_error_handler); } catch (err) {}
+}
 if (variable_instance_exists(id,"mcp_release")) mcp_release();
 '''
     return {'Create': create, 'BeginStep': begin, 'DrawGUIEnd': draw, 'CleanUp': cleanup}

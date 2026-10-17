@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from PIL import Image
 from .display import integer
+from .resources import name_check, trigger_spec
 from .storage import compact_encode, encode, parse_yy
 
 
@@ -77,22 +78,32 @@ def child_path(root, name):
     return path
 
 
-def key_codes(keys):
-    named = {'backspace': 8, 'tab': 9, 'enter': 13, 'escape': 27, 'space': 32,
+KEY_NAMES = {'backspace': 8, 'tab': 9, 'enter': 13, 'escape': 27, 'space': 32,
              'left': 37, 'up': 38, 'right': 39, 'down': 40}
+
+
+def key_code(key):
+    """把单个按键名称或 1～255 的键码归一为 Windows 虚拟键码。"""
+    if type(key) is int:
+        if not 1 <= key <= 255:
+            raise ValueError('键码须为 1～255')
+        return key
+    if not isinstance(key, str):
+        raise ValueError('按键须为名称或单个英文字母/数字')
+    name = key.lower()
+    if name in KEY_NAMES:
+        return KEY_NAMES[name]
+    if re.fullmatch('[a-z0-9]', name):
+        return ord(name.upper())
+    raise ValueError('仅支持字母、数字、方向键及 space/enter/escape/tab/backspace')
+
+
+def key_codes(keys):
     if not isinstance(keys, list) or not 1 <= len(keys) <= 8:
         raise ValueError('keys 须包含 1～8 个按键')
     values = []
     for key in keys:
-        if not isinstance(key, str):
-            raise ValueError('按键须为名称或单个英文字母/数字')
-        name = key.lower()
-        if name in named:
-            value = named[name]
-        elif re.fullmatch('[a-z0-9]', name):
-            value = ord(name.upper())
-        else:
-            raise ValueError('仅支持字母、数字、方向键及 space/enter/escape/tab/backspace')
+        value = key_code(key)
         if value in values:
             raise ValueError('按键不能重复')
         values.append(value)
@@ -176,6 +187,51 @@ class Runtime:
             raise ValueError('运行响应格式不正确')
         return data
 
+    def _errors(self):
+        """读取桥接捕获的运行时异常；文件不存在、过期或损坏时返回空列表。"""
+        try:
+            data = bounded_json(self._file('errors.json'), 2 * 1024 * 1024)
+        except (OSError, ValueError, UnicodeError):
+            return []
+        if not self.session or data.get('session') != self.session['id']:
+            return []
+        items = data.get('errors')
+        if not isinstance(items, list):
+            return []
+        rows = []
+        for item in items[:20]:
+            if not isinstance(item, dict):
+                continue
+            row = {}
+            for key in ('frame', 'line'):
+                value = item.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    row[key] = value
+            for key in ('stage', 'message', 'long_message', 'script'):
+                value = item.get(key)
+                if isinstance(value, str):
+                    row[key] = self._redact(value[:4096])
+            stack = item.get('stacktrace')
+            if isinstance(stack, list):
+                row['stacktrace'] = [self._redact(value[:1024]) for value in stack[:32]
+                                     if isinstance(value, str)]
+            rows.append(row)
+        return rows
+
+    def errors(self, session_id, after=0, limit=20):
+        integer(after, 'after', 0, 2**63 - 1)
+        integer(limit, 'limit', 1, 50)
+        with self.guard:
+            self._require_session(session_id)
+            rows = self._errors()
+            selected = [{'index': index, **row} for index, row in enumerate(rows, 1) if index > after][:limit]
+            return {'session_id': session_id, 'errors': selected, 'count': len(selected),
+                    'total': len(rows), 'next': selected[-1]['index'] if selected else after,
+                    'exit_code': self.process.poll() if self.process is not None else None,
+                    'state': 'stopped' if self.session.get('stopped') else
+                        'running' if self._ready() else 'exited' if self.process is not None and
+                        self.process.poll() is not None else 'building_or_starting'}
+
     def status(self, wait_seconds=0):
         integer(wait_seconds, 'wait_seconds', 0, 10)
         deadline = time.monotonic() + wait_seconds
@@ -188,6 +244,8 @@ class Runtime:
                     'bridge_ready': ready, 'exit_code': code,
                     'state': 'idle' if not self.session else 'stopped' if self.session.get('stopped') else
                         'running' if ready else 'exited' if code is not None else 'building_or_starting'}
+                if self.session:
+                    result['error_count'] = len(self._errors())
                 if self.pending:
                     result['pending_request'] = self.pending
                     try:
@@ -363,7 +421,7 @@ class Runtime:
     def request(self, session_id, command, arguments=None, timeout=15):
         with self.guard:
             self._require_session(session_id)
-            if command not in {'state', 'capture', 'input', 'wait'}:
+            if command not in {'state', 'capture', 'input', 'wait', 'event'}:
                 raise ValueError('不支持的运行请求')
             if not self._ready():
                 raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
@@ -393,7 +451,7 @@ class Runtime:
             time.sleep(0.025)
         raise ValueError('运行请求超时，执行结果未知；查询 runtime_status 确认，勿直接重试')
 
-    def inspect(self, session_id, object_name='', variables=None, limit=32):
+    def _state_args(self, object_name='', variables=None, limit=32):
         integer(limit, 'limit', 1, 100)
         variables = ['x', 'y', 'hspeed', 'vspeed', 'image_index', 'visible'] if variables is None else variables
         if not isinstance(variables, list) or len(variables) > 16 or any(
@@ -401,11 +459,147 @@ class Runtime:
             raise ValueError('variables 最多 16 个变量名，不接受表达式')
         if object_name and not re.fullmatch('[A-Za-z_][A-Za-z0-9_]{0,63}', object_name):
             raise ValueError('object_name 必须是有效的英语标识符')
+        return object_name, variables, limit
+
+    def inspect(self, session_id, object_name='', variables=None, limit=32):
+        object_name, variables, limit = self._state_args(object_name, variables, limit)
         result = self.request(session_id, 'state', {'object_name': object_name,
             'variables': variables, 'limit': limit})
         if isinstance(result.get('data'), dict) and 'error' in result['data']:
             raise ValueError(self._redact(str(result['data']['error'])))
         return result
+
+    def _event_args(self, object_name, event, number=0, collision_object=None,
+                    key=None, instance_id=None, limit=32):
+        if not isinstance(object_name, str) or not object_name:
+            raise ValueError('object_name 不能为空')
+        name_check(object_name)
+        if not isinstance(event, str):
+            raise ValueError('event 必须是事件名称')
+        if type(number) is not int:
+            raise ValueError('事件编号必须为整数')
+        if key is not None:
+            if number != 0:
+                raise ValueError('key 与 number 只能提供一个')
+            number = key_code(key)
+        if instance_id is not None:
+            integer(instance_id, 'instance_id', 1, 2**63 - 1)
+        integer(limit, 'limit', 1, 100)
+        event_type, event_number, collision = trigger_spec(event, number, collision_object)
+        args = {'object_name': object_name, 'event': event, 'event_type': event_type,
+                'event_number': event_number, 'limit': limit}
+        if collision is not None:
+            args['collision_object'] = collision
+        if instance_id is not None:
+            args['instance_id'] = instance_id
+        return args
+
+    def trigger_event(self, session_id, object_name, event, number=0, collision_object=None,
+                      key=None, instance_id=None, limit=32, dry_run=True):
+        """通过桥接数据执行 event_perform；不注入物理输入，不改变前台窗口。"""
+        args = self._event_args(object_name, event, number, collision_object, key,
+                                instance_id, limit)
+        with self.guard:
+            self._require_session(session_id)
+            if not dry_run and not self._ready():
+                raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
+        preview = {'dry_run': dry_run, 'session_id': session_id, **args}
+        if dry_run:
+            return preview
+        return self.request(session_id, 'event', args)
+
+    def _sequence_step(self, step):
+        if not isinstance(step, dict):
+            raise ValueError('序列步骤须为对象')
+        action = step.get('action')
+        allowed = {'wait': {'action', 'frames'}, 'input': {'action', 'keys', 'frames'},
+                   'capture': {'action'}, 'state': {'action', 'object_name', 'variables', 'limit'},
+                   'event': {'action', 'object_name', 'event', 'number', 'collision_object',
+                             'key', 'instance_id', 'limit'}}
+        if action not in allowed:
+            raise ValueError('不支持的序列动作：' + str(action))
+        extra = set(step) - allowed[action]
+        if extra:
+            raise ValueError('序列步骤包含未知参数：' + ', '.join(sorted(extra)))
+        if action == 'wait':
+            frames = step.get('frames', 1)
+            integer(frames, 'frames', 1, 600)
+            return {'action': 'wait', 'frames': frames}
+        if action == 'input':
+            frames = step.get('frames', 1)
+            integer(frames, 'frames', 1, 300)
+            key_codes(step.get('keys'))
+            return {'action': 'input', 'keys': step.get('keys'), 'frames': frames}
+        if action == 'capture':
+            return {'action': 'capture'}
+        if action == 'event':
+            args = self._event_args(step.get('object_name'), step.get('event'),
+                step.get('number', 0), step.get('collision_object'), step.get('key'),
+                step.get('instance_id'), step.get('limit', 32))
+            return {'action': 'event', **args}
+        object_name, variables, limit = self._state_args(step.get('object_name', ''),
+            step.get('variables'), step.get('limit', 32))
+        return {'action': 'state', 'object_name': object_name,
+                'variables': variables, 'limit': limit}
+
+    def run_sequence(self, session_id, steps, dry_run=True, max_images=4):
+        """按顺序执行受限动作；返回每步结果，截图以独立 PNG 字节列表返回。"""
+        integer(max_images, 'max_images', 1, 4)
+        if not isinstance(steps, list) or not 1 <= len(steps) <= 32:
+            raise ValueError('steps 须包含 1～32 个动作')
+        normalized = [self._sequence_step(step) for step in steps]
+        total_frames = sum(step.get('frames', 0) for step in normalized)
+        if total_frames > 1800:
+            raise ValueError('序列总帧数不能超过 1800')
+        captures = sum(1 for step in normalized if step['action'] == 'capture')
+        if captures > max_images:
+            raise ValueError('截图数量超过 max_images')
+        with self.guard:
+            self._require_session(session_id)
+        preview = {'session_id': session_id, 'steps': normalized, 'total_frames': total_frames,
+                   'captures': captures}
+        if dry_run:
+            return {'dry_run': True, **preview}
+        if not self._ready():
+            raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
+        results, pictures = [], []
+        deadline = time.monotonic() + 150
+        for index, step in enumerate(normalized, 1):
+            if time.monotonic() >= deadline:
+                results.append({'index': index, 'action': step['action'], 'error': '序列超时'})
+                return {'dry_run': False, 'session_id': session_id, 'ok': False,
+                        'results': results, 'failed_step': index, 'pictures': pictures}
+            action = step['action']
+            try:
+                if action == 'wait':
+                    data = self.wait(session_id, step['frames'])
+                elif action == 'input':
+                    data = self.input(session_id, step['keys'], step['frames'], dry_run=False)
+                elif action == 'state':
+                    data = self.inspect(session_id, step['object_name'],
+                                        step['variables'], step['limit'])
+                elif action == 'event':
+                    data = self.request(session_id, 'event',
+                                        {key: value for key, value in step.items() if key != 'action'})
+                else:
+                    data = self.request(session_id, 'capture')
+                    picture = data.pop('image', None)
+                    item = {'index': index, 'action': action, 'data': data.get('data'),
+                            'frame': data.get('frame')}
+                    if picture is not None:
+                        item['image_index'] = len(pictures)
+                        pictures.append(picture)
+                    results.append(item)
+                    continue
+                results.append({'index': index, 'action': action,
+                                'data': data.get('data'), 'frame': data.get('frame')})
+            except ValueError as exc:
+                results.append({'index': index, 'action': action,
+                                'error': self._redact(str(exc))})
+                return {'dry_run': False, 'session_id': session_id, 'ok': False,
+                        'results': results, 'failed_step': index, 'pictures': pictures}
+        return {'dry_run': False, 'session_id': session_id, 'ok': True,
+                'results': results, 'pictures': pictures}
 
     def input(self, session_id, keys, frames=1, dry_run=True):
         integer(frames, 'frames', 1, 300)
@@ -421,6 +615,53 @@ class Runtime:
         integer(frames, 'frames', 1, 600)
         return self.request(session_id, 'wait', {'frames': frames},
                             timeout=max(15, frames / 10 + 10))
+
+    def mouse(self, session_id, action, x=None, y=None, button='left', delta=0,
+              hold_ms=50, mode='message', dry_run=True):
+        """向本次运行的游戏窗口投递鼠标动作；坐标为窗口客户区像素。
+        默认 mode=message 使用窗口消息，不移动真实光标、不要求前台焦点；
+        mode=physical 才使用系统级注入。
+        """
+        if action not in {'move', 'click', 'wheel'}:
+            raise ValueError('鼠标动作须为 move、click 或 wheel')
+        if button not in {'left', 'right', 'middle'}:
+            raise ValueError('鼠标按钮须为 left、right 或 middle')
+        if mode not in {'message', 'physical'}:
+            raise ValueError('鼠标模式须为 message 或 physical')
+        integer(hold_ms, 'hold_ms', 10, 500)
+        if type(delta) is not int or not -5 <= delta <= 5:
+            raise ValueError('滚轮 delta 须为 -5～5 的整数')
+        if action == 'wheel':
+            if delta == 0:
+                raise ValueError('滚轮 delta 不能为 0')
+        elif delta != 0:
+            raise ValueError('只有 wheel 动作使用 delta')
+        if (x is None) != (y is None):
+            raise ValueError('x 和 y 必须同时提供或同时省略')
+        if x is not None:
+            integer(x, 'x', 0, 32768)
+            integer(y, 'y', 0, 32768)
+        elif action in {'move', 'click'}:
+            raise ValueError('move/click 必须提供 x 和 y')
+        with self.guard:
+            self._require_session(session_id)
+            if not self._ready():
+                raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
+        from . import win_mouse
+        window = win_mouse.find_game_window(self.process.pid, 'MORX_Run_' + session_id)
+        if x is not None and not (x < window.width and y < window.height):
+            raise ValueError(f'坐标超出游戏窗口客户区 {window.width}×{window.height}')
+        preview = {'session_id': session_id, 'action': action, 'x': x, 'y': y,
+                   'button': button if action == 'click' else None,
+                   'delta': delta if action == 'wheel' else 0, 'mode': mode,
+                   'window': {'width': window.width, 'height': window.height}}
+        if dry_run:
+            return {'dry_run': True, **preview}
+        if mode == 'message':
+            point = win_mouse.send_mouse_message(window, action, x, y, button, delta, hold_ms)
+        else:
+            point = win_mouse.send_mouse(window, action, x, y, button, delta, hold_ms)
+        return {'dry_run': False, **preview, 'cursor': point}
 
     def _capture_bytes(self, request_id):
         path = self._file('capture_' + request_id + '.png')
@@ -444,6 +685,7 @@ class Runtime:
             session = self._require_session(session_id)
             if dry_run:
                 return {'dry_run': True, 'session_id': session_id, 'action': 'stop_owned_session'}
+            errors = self._errors()
             if not session.get('stopped'):
                 # 删除会话文件本身就是桥接的退出信号，下一帧 BeginStep 会结束游戏。
                 self._file('session.json').unlink(missing_ok=True)
@@ -471,7 +713,8 @@ class Runtime:
                     process.wait(timeout=3)
         self._cleanup(session)
         return {'session_id': session_id, 'stopped': True,
-                'exit_code': process.poll() if process else None, 'cleaned': True}
+                'exit_code': process.poll() if process else None, 'cleaned': True,
+                'error_count': len(errors), 'errors': errors}
 
     def _expire(self, session_id):
         try:

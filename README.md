@@ -1,7 +1,7 @@
 # MORX GMS2 MCP
 
 [![CI](https://github.com/MKTLMORX/morx-gms2-mcp/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/MKTLMORX/morx-gms2-mcp/actions/workflows/tests.yml)
-[![PyPI 0.5.0](https://img.shields.io/badge/PyPI-0.5.0-3775A9?style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/morx-gms2-mcp/)
+[![PyPI 0.6.0](https://img.shields.io/badge/PyPI-0.6.0-3775A9?style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/morx-gms2-mcp/)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
 [![Windows](https://img.shields.io/badge/Platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)](#适用范围)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
@@ -12,9 +12,7 @@ MORX GMS2 MCP 是一个本地 stdio MCP 服务。AI 客户端可以读取项目�
 
 *Local stdio MCP server for GameMaker project authoring, isolated runs, and runtime inspection.*
 
-当前提供 58 个工具；服务使用本地 stdio，默认只读，运行能力默认关闭，MIT 许可。
-
-本文对应 `0.6.0`。使用本页全部功能请[从源码安装](#1-安装)；PyPI 安装包版本见上方徽章。
+当前版本 `0.6.0`，提供 58 个工具；服务使用本地 stdio，默认只读，运行能力默认关闭，MIT 许可。
 
 [快速开始](#快速开始) · [能做什么](#能做什么) · [连接客户端](#连接客户端) · [使用示例](#使用示例) · [运行与观察](#运行与观察) · [工具清单](#工具清单) · [English](#english-quick-start)
 
@@ -66,6 +64,8 @@ $mcpPython = (Resolve-Path '.venv\Scripts\python.exe').Path
 & $mcpPython -m pip install morx-gms2-mcp
 & $mcpPython -m morx_gms2_mcp --version
 ```
+
+升级已有安装时，pipx 用户运行 `pipx upgrade morx-gms2-mcp`；venv 用户在原环境运行 `& $mcpPython -m pip install --upgrade morx-gms2-mcp`。升级后重新连接 MCP 客户端，并通过 `server_info` 核对版本及桥接兼容性。
 
 <details>
 <summary>从源码安装</summary>
@@ -482,9 +482,7 @@ PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最
 
 ## English quick start
 
-MORX GMS2 MCP is a local stdio server for AI-assisted GameMaker development. An assistant can inspect the project, create, rename and remove resources, edit code, build and run an isolated Windows copy, observe the game, and refine the result from runtime output. It exposes 58 tools with previews, backups and rollback.
-
-This README describes `0.6.0`. Install from source for all features documented here; the badge above shows the PyPI package version.
+MORX GMS2 MCP is a local stdio server for AI-assisted GameMaker development. An assistant can inspect the project, create, rename and remove resources, edit code, build and run an isolated Windows copy, observe the game, and refine the result from runtime output. Version `0.6.0` exposes 58 tools with previews, backups and rollback.
 
 Use an inspect → author → run and observe → adjust workflow. The AI client coordinates the work; this server handles project files, resources, GML and isolated runs. Runtime observation uses the server's own bridge inside the game, not desktop capture. IDE GUI control and native breakpoint/step debugging remain outside its scope.
 
@@ -493,6 +491,8 @@ Use an inspect → author → run and observe → adjust workflow. The AI client
 3. Generate configuration with `client-config --project <project> --client codex` or `--client claude`. Add `--write` only when resource writes are intended. Merge the result into the client configuration and reconnect.
 4. Verify the target with `server_info`. Mutation tools default to `dry_run=true`; execution requires both a writable server and explicit `dry_run=false`.
 5. For runtime observation, start with `--allow-run` and the Runtime/user-folder options, run `install_runtime_bridge` (preview first), then `run_game`. Poll `runtime_status` until `bridge_ready=true` before calling `capture_game`, `inspect_game`, `get_runtime_errors`, `wait_game_frames`, `trigger_game_event` or `send_game_mouse`. Use `set_game_variables` to write instance or global variables by name (booleans, numbers, strings, arrays and structs; no null or expressions), and `spawn_game_instance` / `destroy_game_instance` to add or remove instances in the current room. Use `run_game_sequence` to batch wait/input/state/set/spawn/destroy/capture/event steps. Finish with `stop_game`; the isolated build copy and save directory are removed.
+
+To upgrade, use `pipx upgrade morx-gms2-mcp` or `python -m pip install --upgrade morx-gms2-mcp` in the original virtual environment. Reconnect the MCP client and check the version and bridge compatibility with `server_info`.
 
 Use `inspect_sprite` before `configure_sprite` or `set_sprite_animation`. Reordering requires every existing frame ID exactly once; durations are positive animation timeline units in the resulting order, not seconds. Omitted durations stay attached to their frames. Pass the returned `sha256` as `expected_sha256` to reject stale edits. Only ordinary continuous bitmap timelines are supported; events and moments prevent retiming. PNG files are preserved. Reordering changes image indices.
 

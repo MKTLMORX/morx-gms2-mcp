@@ -7,9 +7,10 @@ import re
 import wave
 from pathlib import Path, PurePosixPath
 from PIL import Image
+from . import audio
 from . import schemas
 from .storage import Storage, digest, encode, parse_yy
-from .animation import number, timeline, retime
+from .animation import number, timeline, retime, geometry, resize_geometry, automatic_bounds
 from .display import WINDOWS_PATH, WINDOWS_FLAGS, VIEW_FIELDS, windows_settings, room_settings, check_expected
 from .display import integer, boolean, title_check
 
@@ -376,6 +377,21 @@ class Project(Storage):
                 raise ValueError('当前启动房间缺少受管理的测试桥接实例，请重新 install_runtime_bridge 修复')
             return key
 
+    def bridge_status(self):
+        """只读预检：升级不会隐式修改游戏项目，客户端可先提示同步桥接。"""
+        from .runtime_bridge import OBJECT
+        with self.lock:
+            installed = any(item['id']['name'] == OBJECT for item in self.metadata()['resources'])
+            if not installed:
+                return {'installed': False, 'compatible': False, 'action': 'install_runtime_bridge',
+                        'message': '运行前需要安装测试桥接；仅编译不需要桥接'}
+            try:
+                self.bridge_key()
+            except (ValueError, KeyError, TypeError, OSError, UnicodeError):
+                return {'installed': True, 'compatible': False, 'action': 'install_runtime_bridge',
+                        'message': '项目桥接需同步或修复；先预览 install_runtime_bridge，再显式执行，服务不会自动修改项目'}
+            return {'installed': True, 'compatible': True, 'action': None}
+
     def install_runtime_bridge(self, dry_run=True):
         from uuid import uuid4
         from .runtime_bridge import OBJECT, sources
@@ -558,6 +574,38 @@ class Project(Storage):
             edit = Edit(self)
             self._group(edit, group)
             return edit.commit(dry_run)
+
+    def remove_empty_group(self, group, expected_sha256, dry_run=True):
+        group_check(group)
+        path = 'folders/' + group + '.yy'
+        with self.lock:
+            edit = Edit(self)
+            check_expected(edit.raw(self.yyp.name), expected_sha256)
+            if expected_sha256 is None:
+                raise ValueError('必须提供 inspect_project 返回的 project_sha256')
+            meta = edit.load(self.yyp.name)
+            folders = meta.get('Folders', [])
+            if sum(f.get('folderPath') == path for f in folders) != 1:
+                raise ValueError('分组不存在或不唯一')
+            children = [f['folderPath'] for f in folders
+                        if f.get('folderPath', '').startswith(path[:-3] + '/')]
+            resources = [item['id']['name'] for item in meta['resources']
+                         if (edit.load(item['id']['path']).get('parent') or {}).get('path') == path]
+            order_rel = self.yyp.with_suffix('.resource_order').name
+            order = edit.load(order_rel, {'FolderOrderSettings': [], 'ResourceOrderSettings': []})
+            references = [item for item in order.get('FolderOrderSettings', []) if item.get('path') == path]
+            info = {'group': group, 'direct_resources': resources, 'child_groups': children,
+                    'sort_references': references, 'empty': not resources and not children}
+            if resources or children:
+                if dry_run:
+                    return {'dry_run': True, 'changed': [], **info}
+                raise ValueError('只允许删除无资源、无子组的空分组')
+            meta['Folders'] = [f for f in folders if f.get('folderPath') != path]
+            order['FolderOrderSettings'] = [v for v in order.get('FolderOrderSettings', []) if v.get('path') != path]
+            edit.save(self.yyp.name, meta)
+            if edit.raw(order_rel) is not None:
+                edit.save(order_rel, order)
+            return {**edit.commit(dry_run), **info}
 
     def _register(self, edit, kind, name, data, group):
         name_check(name)
@@ -980,14 +1028,86 @@ class Project(Storage):
             ref, data, sequence, track, keys, frames = self._sprite_animation(edit, name)
             image_indices = {frame['name']: index for index, frame in enumerate(data['frames'])}
             return {'name': name, 'path': ref['path'], 'sha256': digest(edit.raw(ref['path'])),
+                'image_sha256': self._sprite_image_hash(edit, name, data),
                 'width': data['width'], 'height': data['height'],
                 'origin': {'mode': data['origin'], 'x': sequence['xorigin'], 'y': sequence['yorigin']},
                 'speed': sequence['playbackSpeed'],
                 'speed_type': ('frames_per_second', 'frames_per_game_frame')[sequence['playbackSpeedType']],
                 'duration_unit': 'animation_frames', 'length': sequence['length'],
+                'geometry': geometry(data),
                 'frames': [{'frame_id': key['Channels']['0']['Id']['name'], 'keyframe_id': key['id'],
                     'image_index': image_indices[key['Channels']['0']['Id']['name']],
                     'start': key['Key'], 'duration': key['Length']} for key in keys]}
+
+    def _sprite_image_hash(self, edit, name, data):
+        hashes = {}
+        for frame in data['frames']:
+            stem = f"sprites/{name}/{frame['name']}"
+            paths = [stem + '.png'] + [f"sprites/{name}/layers/{frame['name']}/{layer['name']}.png"
+                                      for layer in data['layers']]
+            for path in paths:
+                hashes[path] = digest(edit.raw(path))
+        return digest(encode(hashes))
+
+    def replace_sprite_images(self, name, png_paths, expected_sha256, expected_image_sha256, dry_run=True,
+                              allow_resize=False, origin_policy='keep', bbox_policy='keep'):
+        boolean(allow_resize, 'allow_resize')
+        if not isinstance(origin_policy, str) or origin_policy not in {'keep', 'scale'}:
+            raise ValueError('origin_policy 须为 keep 或 scale')
+        if not isinstance(bbox_policy, str) or bbox_policy not in {'keep', 'scale', 'full_image'}:
+            raise ValueError('bbox_policy 须为 keep、scale 或 full_image')
+        with self.lock:
+            edit = Edit(self)
+            ref, data, sequence, track, keys, frames = self._sprite_animation(edit, name, expected_sha256)
+            if not expected_sha256 or not expected_image_sha256 or self._sprite_image_hash(edit, name, data) != expected_image_sha256:
+                raise ValueError('必须提供最新 inspect_sprite 的描述及图像哈希；图像可能已变化')
+            if len(data['layers']) != 1:
+                raise ValueError('仅支持单图像图层的普通位图精灵')
+            if type(data.get('bboxMode')) is not int or data['bboxMode'] not in (0, 1, 2):
+                raise ValueError('精灵碰撞框模式不受支持')
+            if not isinstance(png_paths, list) or len(png_paths) != len(keys):
+                raise ValueError('替换 PNG 数量必须与现有动画帧数一致，按动画顺序提供')
+            size, alpha_bounds = None, None
+            before_geometry = geometry(data)
+            for key, source in zip(keys, png_paths):
+                path = Path(source).resolve(strict=True)
+                if path.suffix.lower() != '.png' or path.stat().st_size > 64 * 1024 * 1024:
+                    raise ValueError('仅支持每张不超过 64 MiB 的 PNG')
+                raw = path.read_bytes()
+                with Image.open(io.BytesIO(raw)) as image:
+                    if image.format != 'PNG' or getattr(image, 'n_frames', 1) != 1:
+                        raise ValueError('PNG 必须为单帧')
+                    if max(image.size) > 8192 or (size and size != image.size):
+                        raise ValueError('所有替换帧须等尺寸且单边不超过 8192')
+                    size = image.size
+                    if not allow_resize and size != (data['width'], data['height']):
+                        raise ValueError('PNG 尺寸与现有精灵不同；需显式 allow_resize=true')
+                    image.verify()
+                if data.get('bboxMode') == 0:
+                    integer(data.get('collisionTolerance'), 'collisionTolerance', 0, 255)
+                    with Image.open(io.BytesIO(raw)) as image:
+                        bounds = image.convert('RGBA').getchannel('A').point(
+                            [255 if v > data['collisionTolerance'] else 0 for v in range(256)]).getbbox()
+                    if bounds is not None:
+                        alpha_bounds = bounds if alpha_bounds is None else (
+                            min(bounds[0], alpha_bounds[0]), min(bounds[1], alpha_bounds[1]),
+                            max(bounds[2], alpha_bounds[2]), max(bounds[3], alpha_bounds[3]))
+                frame = key['Channels']['0']['Id']['name']
+                layer = data['layers'][0]['name']
+                for target in (f'sprites/{name}/{frame}.png', f'sprites/{name}/layers/{frame}/{layer}.png'):
+                    edit.changes[target] = raw
+            resized = size != (data['width'], data['height'])
+            dimensions = {'before': before_geometry, 'after': geometry(data)}
+            if resized:
+                dimensions = resize_geometry(data, *size, origin_policy, bbox_policy, alpha_bounds)
+            elif data.get('bboxMode') == 0:
+                automatic_bounds(data, alpha_bounds)
+                dimensions['after'] = geometry(data)
+            if geometry(data) != before_geometry:
+                edit.save(ref['path'], data)
+            result = edit.commit(dry_run)
+            result.update(resized=resized, geometry=dimensions, compiled=False)
+            return result
 
     def configure_sprite(self, name, speed=None, speed_type=None, origin_x=None, origin_y=None,
                          expected_sha256=None, dry_run=True):
@@ -1087,11 +1207,84 @@ class Project(Storage):
         return {'sample_rate': rate, 'channels': channels, 'duration': duration,
                 'bit_rate': max(1, min(512, bit_rate)), 'eos': eos}
 
-    def import_sound(self, name, audio_path, group='声音', volume=1.0, dry_run=False):
+    def _sound(self, edit, name):
+        ref, data = self._ref(edit, name, 'sounds')
+        audio.settings(data)
+        return ref, data
+
+    def _sound_group(self, edit, data):
+        group = data['audioGroupId']['name']
+        name_check(group)
+        groups = edit.load(self.yyp.name).get('AudioGroups', [])
+        if sum(item.get('name') == group for item in groups) != 1:
+            raise ValueError('音频组未唯一存在：' + group)
+        if data['compression'] == 3 and group != 'audiogroup_default':
+            raise ValueError('streamed 只接受 audiogroup_default；请显式设置 audio_group，不自动更改分组')
+
+    def _sound_summary(self, edit, ref, data):
+        filename = data.get('soundFile')
+        if (not isinstance(filename, str) or not filename or len(filename) > 255
+                or filename in ('.', '..') or re.search(r'[<>:"/\\|?*\x00-\x1f]', filename)):
+            raise ValueError('声音源文件名不受支持')
+        relative = ref['path'].rsplit('/', 1)[0] + '/' + filename
+        source = self.path(relative)
+        if source.is_file() and source.stat().st_size > 128 * 1024 * 1024:
+            raise ValueError('声音源文件超过 128 MiB')
+        raw = edit.raw(relative)
+        return {'name': data['name'], 'path': ref['path'], 'sha256': digest(edit.raw(ref['path'])),
+                'settings': audio.settings(data), 'duration': data.get('duration'),
+                'source_file': {'path': relative, 'exists': raw is not None,
+                                'sha256': digest(raw), 'bytes': len(raw) if raw is not None else None,
+                                'format': Path(filename).suffix.lower().lstrip('.')},
+                'configuration_overrides': bool(data.get('ConfigValues')),
+                'notes': audio.notes(data)}
+
+    def inspect_sound(self, name):
+        with self.lock:
+            edit = Edit(self)
+            ref, data = self._sound(edit, name)
+            result = self._sound_summary(edit, ref, data)
+            result['audio_groups'] = [item['name'] for item in edit.load(self.yyp.name).get('AudioGroups', [])]
+            return result
+
+    def configure_sound(self, name, expected_sha256, volume=None, compression=None, preload=None,
+                        compression_quality=None, conversion_mode=None, audio_group=None,
+                        sample_rate=None, channel_format=None, bit_depth=None, dry_run=True):
+        changes = audio.updates(volume, compression, preload, compression_quality,
+                                conversion_mode, sample_rate, channel_format, bit_depth)
+        if not isinstance(expected_sha256, str) or not re.fullmatch('[a-f0-9]{64}', expected_sha256):
+            raise ValueError('必须提供 inspect_sound 返回的 expected_sha256')
+        if audio_group is not None:
+            name_check(audio_group)
+            changes['audioGroupId'] = {'name': audio_group, 'path': 'audiogroups/' + audio_group}
+        with self.lock:
+            edit = Edit(self)
+            ref, data = self._sound(edit, name)
+            if digest(edit.raw(ref['path'])) != expected_sha256:
+                raise ValueError('声音描述已被修改，请重新 inspect_sound 并预览')
+            if data.get('ConfigValues'):
+                raise ValueError('声音含配置覆盖，暂不修改；请先在 IDE 中确认各配置')
+            before = audio.settings(data)
+            original = encode(data)
+            data.update(changes)
+            self._sound_group(edit, data)
+            summary = self._sound_summary(edit, ref, data)
+            if not summary['source_file']['exists']:
+                raise ValueError('声音缺少源文件，请先修复资源')
+            if encode(data) != original:
+                edit.save(ref['path'], data)
+            result = edit.commit(dry_run)
+            result.update(before=before, settings=summary['settings'], notes=summary['notes'], compiled=False)
+            return result
+
+    def import_sound(self, name, audio_path, group='声音', volume=1.0, dry_run=False,
+                     compression='uncompressed', preload=False, compression_quality=4,
+                     conversion_mode='automatic', audio_group='audiogroup_default',
+                     sample_rate=None, channel_format=None, bit_depth=16):
         name_check(name)
-        finite(volume, '音量', 0)
-        if volume > 1:
-            raise ValueError('音量须为 0～1')
+        name_check(audio_group)
+        options = audio.updates(volume, compression, preload, compression_quality,
+                                conversion_mode, sample_rate, channel_format, bit_depth)
         path = Path(audio_path).resolve(strict=True)
         suffix = path.suffix.lower()
         if suffix not in ('.wav', '.ogg') or path.stat().st_size > 128 * 1024 * 1024:
@@ -1113,8 +1306,7 @@ class Project(Storage):
         data = {
             '$GMSound': 'v2',
             '%Name': name,
-            'audioGroupId': {'name': 'audiogroup_default',
-                             'path': 'audiogroups/audiogroup_default'},
+            'audioGroupId': {'name': audio_group, 'path': 'audiogroups/' + audio_group},
             'bitDepth': 1,
             'channelFormat': info['channels'] - 1,
             'compression': 0,
@@ -1131,16 +1323,18 @@ class Project(Storage):
             'soundFile': name + suffix,
             'volume': volume,
         }
+        data.update(options)
+        audio.settings(data)
         with self.lock:
             edit = Edit(self)
-            if not any(g['name'] == 'audiogroup_default' for g in edit.load(self.yyp.name).get('AudioGroups', [])):
-                raise ValueError('项目缺少默认音频组')
+            self._sound_group(edit, data)
             self._register(edit, 'sounds', name, data, group)
             edit.new(f'sounds/{name}/{name}{suffix}', raw)
             result = edit.commit(dry_run)
             result.update({'format': suffix[1:], 'sample_rate': info['sample_rate'],
                            'channels': info['channels'], 'duration': info['duration'],
-                           'sha256': digest(raw)})
+                           'sha256': digest(raw), 'settings': audio.settings(data),
+                           'notes': audio.notes(data), 'compiled': False})
             return result
 
     def import_font(self, name, font_path, dry_run=False):
@@ -1372,4 +1566,4 @@ class Project(Storage):
     def validate(self):
         from .validation import validate
         with self.lock:
-            return validate(self)
+            return {**validate(self), 'project_sha256': digest(self.yyp.read_bytes())}

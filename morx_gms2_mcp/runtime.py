@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from PIL import Image
 from .display import integer
-from .resources import name_check, trigger_spec
+from .resources import name_check, trigger_spec, replace_refs
 from .storage import compact_encode, encode, parse_yy, replace_retry
 
 
@@ -80,7 +80,8 @@ def child_path(root, name):
 
 
 KEY_NAMES = {'backspace': 8, 'tab': 9, 'enter': 13, 'escape': 27, 'space': 32,
-             'left': 37, 'up': 38, 'right': 39, 'down': 40}
+             'pageup': 33, 'pagedown': 34, 'end': 35, 'home': 36,
+             'left': 37, 'up': 38, 'right': 39, 'down': 40, 'insert': 45, 'delete': 46}
 
 
 def instance_ref(value):
@@ -110,7 +111,7 @@ def key_code(key):
         return KEY_NAMES[name]
     if re.fullmatch('[a-z0-9]', name):
         return ord(name.upper())
-    raise ValueError('仅支持字母、数字、方向键及 space/enter/escape/tab/backspace')
+    raise ValueError('仅支持字母、数字及 ' + '/'.join(KEY_NAMES))
 
 
 def key_codes(keys):
@@ -125,11 +126,63 @@ def key_codes(keys):
     return values
 
 
+def bridge_io_summary(data):
+    """只解释有界文件诊断，不从累计重试数推断命令失败，也不返回任意路径。"""
+    if not isinstance(data, dict):
+        return {'available': False, 'state': 'unavailable'}
+
+    def count(value, minimum=0):
+        if type(value) not in (int, float) or not minimum <= value <= 2**53 - 1 or int(value) != value:
+            return None
+        return int(value)
+
+    pending = count(data.get('pending_writes'))
+    retries = count(data.get('retry_attempts', data.get('write_failures')))
+    if pending is None or pending > 3 or retries is None:
+        return {'available': False, 'state': 'unknown', 'reason': 'invalid_diagnostics'}
+    detailed = 'retry_recoveries' in data
+    recoveries = count(data.get('retry_recoveries')) if detailed else None
+    stalled = count(data.get('stalled_writes')) if detailed else None
+    if detailed and (recoveries is None or recoveries > retries or stalled is None or stalled > pending):
+        return {'available': False, 'state': 'unknown', 'reason': 'invalid_diagnostics'}
+    state = 'stalled' if stalled else 'retrying' if pending else \
+        'recovered' if recoveries else 'unknown' if retries else 'healthy'
+    files = []
+    rows = data.get('files', [])
+    if isinstance(rows, list):
+        seen = set()
+        for row in rows[:3]:
+            if not isinstance(row, dict) or not isinstance(row.get('file'), str) or row['file'] not in {'ready.json', 'response.json', 'errors.json'}:
+                continue
+            if row['file'] in seen:
+                continue
+            seen.add(row['file'])
+            clean = {'file': row['file']}
+            for field in ('pending_age_ms', 'retry_attempts', 'current_retry_attempts', 'recovery_count', 'last_recovery_attempts',
+                          'first_failure_frame', 'last_failure_frame', 'last_recovery_frame'):
+                clean[field] = count(row.get(field), -1 if field.endswith('_frame') else 0)
+            clean['pending'] = row.get('pending') if type(row.get('pending')) is bool else None
+            state_name = row.get('state')
+            clean['state'] = state_name if isinstance(state_name, str) and state_name in {'healthy', 'recovered', 'retrying', 'stalled'} else 'unknown'
+            stage = row.get('last_failure_stage')
+            clean['last_failure_stage'] = stage if isinstance(stage, str) and stage in {'', 'replace_destination', 'promote_temporary', 'temporary_file_missing'} else 'unknown'
+            for field in ('request', 'last_failure_request', 'last_recovery_request'):
+                request = row.get(field)
+                clean[field] = request if isinstance(request, str) and re.fullmatch('[a-f0-9]{32}', request) else None
+            files.append(clean)
+    return {'available': True, 'detail_available': detailed, 'state': state,
+            'pending_writes': pending, 'stalled_writes': stalled,
+            'retry_attempts': retries, 'retry_recoveries': recoveries,
+            'write_failures': retries, 'write_failures_semantics': 'retry_attempts_not_final_failures',
+            'sample_frame': count(data.get('sample_frame')), 'stall_threshold_ms': 10000, 'files': files}
+
+
 class Runtime:
     def __init__(self, project, options=None):
         self.project = project
         self.options = options or RuntimeOptions()
         self.guard = threading.RLock()
+        self.mouse_guard = threading.Lock()
         self.session = None
         self.process = None
         self.pending = None
@@ -137,6 +190,9 @@ class Runtime:
         self.sequence = 0
         self.timer = None
         self.redactions = []
+        self.heartbeat = None
+        self.pending_since = None
+        self.build_diagnostics = deque(maxlen=100)
 
     def _bridge(self):
         return self.project.bridge_key()
@@ -169,18 +225,45 @@ class Runtime:
     def _file(self, name):
         return child_path(self.session['bridge_directory'], name)
 
-    def _ready(self):
+    def _readiness(self):
         if not self.session or self.session.get('stopped'):
-            return False
+            return {'ready': False, 'reason': 'no_active_session'}
+        if self.session.get('compile_only'):
+            return {'ready': False, 'reason': 'compile_only'}
         if self.process is not None and self.process.poll() is not None:
-            return False
-        try:
-            path = self._file('ready.json')
-            data = bounded_json(path)
-            return (data.get('session') == self.session['id'] and data.get('bridge') == self.session['bridge']
-                    and time.time() - path.stat().st_mtime < 10)
-        except (OSError, ValueError):
-            return False
+            return {'ready': False, 'reason': 'process_exited'}
+        reason = 'heartbeat_missing'
+        for attempt in range(3):
+            try:
+                path = self._file('ready.json')
+                data = bounded_json(path)
+                if data.get('session') != self.session['id'] or data.get('bridge') != self.session['bridge']:
+                    return {'ready': False, 'reason': 'heartbeat_identity_mismatch'}
+                self.heartbeat = {'mtime': path.stat().st_mtime, 'frame': data.get('frame'),
+                                  'bridge_io': bridge_io_summary(data.get('bridge_io'))}
+                reason = 'heartbeat_received'
+                break
+            except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+                reason = 'heartbeat_missing' if isinstance(exc, FileNotFoundError) else 'heartbeat_unreadable'
+                if attempt < 2:
+                    time.sleep(.01)
+            except ValueError:
+                return {'ready': False, 'reason': 'heartbeat_invalid'}
+        if self.heartbeat:
+            age = max(0, time.time() - self.heartbeat['mtime'])
+            return {'ready': age < 10, 'reason': 'heartbeat_stale' if age >= 10 else reason,
+                    'heartbeat_age_seconds': round(age, 3), 'heartbeat_frame': self.heartbeat['frame'],
+                    'cached': reason != 'heartbeat_received'}
+        return {'ready': False, 'reason': reason, 'heartbeat_age_seconds': None}
+
+    def _ready(self):
+        return self._readiness()['ready']
+
+    def _io_status(self, current=False):
+        heartbeat = self.heartbeat or {}
+        return {**heartbeat.get('bridge_io', {'available': False, 'state': 'unavailable'}),
+                'source': 'heartbeat', 'current': current,
+                'sample_age_seconds': round(max(0, time.time() - heartbeat['mtime']), 3) if 'mtime' in heartbeat else None}
 
     def _redact(self, text):
         for value in sorted(self.redactions, key=len, reverse=True):
@@ -191,16 +274,29 @@ class Runtime:
         return text
 
     def _response(self, request_id):
-        try:
-            data = bounded_json(self._file('response.json'), 4 * 1024 * 1024)
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            return None
-        # 大小超限、非对象等确定性错误继续抛出，由调用方清理 pending。
-        if data.get('session') != self.session['id'] or data.get('request') != request_id:
-            return None
-        if type(data.get('ok')) is not bool or not isinstance(data.get('data'), dict):
-            raise ValueError('运行响应格式不正确')
-        return data
+        for name in ('response.json', 'response.json.tmp'):
+            try:
+                data = bounded_json(self._file(name), 4 * 1024 * 1024)
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if data.get('session') != self.session['id'] or data.get('request') != request_id:
+                continue
+            if type(data.get('ok')) is not bool or not isinstance(data.get('data'), dict):
+                raise ValueError('运行响应格式不正确')
+            if name.endswith('.tmp'):
+                # 完整且身份匹配的回执已证明执行完成；不重新发送命令，也不移动仍可能被游戏打开的文件。
+                data['response_source'] = 'completed_temporary_file'
+            return data
+        return None
+
+    def _build_status(self, ready=False):
+        code = self.process.poll() if self.process is not None else None
+        status = 'idle' if not self.session else 'succeeded' if ready or self.session.get('build_succeeded') else \
+            'failed' if code is not None and code != 0 else \
+            'succeeded' if code == 0 and self.session.get('compile_only') else \
+            'unverified' if code == 0 or self.session.get('stopped') else 'building'
+        return {'build_status': status, 'compile_error_count': len(self.build_diagnostics),
+                'build_diagnostics': list(self.build_diagnostics), 'compiled': status == 'succeeded'}
 
     def _errors(self):
         """读取桥接捕获的运行时异常；文件不存在、过期或损坏时返回空列表。"""
@@ -252,17 +348,24 @@ class Runtime:
         deadline = time.monotonic() + wait_seconds
         while True:
             with self.guard:
-                ready = self._ready()
+                readiness = self._readiness()
+                ready = readiness['ready']
                 code = self.process.poll() if self.process is not None else None
                 result = {'enabled': self.options.enabled, 'configured': bool(self.options.runtime_root and self.options.user_directory),
                     'session_id': self.session['id'] if self.session else None,
                     'bridge_ready': ready, 'exit_code': code,
                     'state': 'idle' if not self.session else 'stopped' if self.session.get('stopped') else
                         'running' if ready else 'exited' if code is not None else 'building_or_starting'}
+                result['bridge_diagnostics'] = readiness
+                result['bridge_io'] = self._io_status(ready)
+                result.update(self._build_status(ready))
                 if self.session:
+                    if ready:
+                        self.session['build_succeeded'] = True
                     result['error_count'] = len(self._errors())
                 if self.pending:
                     result['pending_request'] = self.pending
+                    result['pending_age_seconds'] = round(time.monotonic() - self.pending_since, 3) if self.pending_since else None
                     try:
                         late = self._response(self.pending)
                     except ValueError as exc:
@@ -272,6 +375,10 @@ class Runtime:
                         if late:
                             result['completed_request'] = late
                             self.pending = None
+                            result.pop('pending_request', None)
+                            result.pop('pending_age_seconds', None)
+                            if late.get('response_source'):
+                                result['response_recovery'] = late['response_source']
                 if ready or code is not None or time.monotonic() >= deadline:
                     return result
             time.sleep(0.05)
@@ -298,7 +405,15 @@ class Runtime:
                     if count > 100000 or total > 2 * 1024**3:
                         raise ValueError('项目运行副本超过 100000 文件或 2 GiB')
                     shutil.copyfile(source, destination / relative)
+            # GameMaker 模板允许资源直接挂在工程根；副本改名时这些引用也必须更新。
             meta = parse_yy((destination / self.project.yyp.name).read_text(encoding='utf-8-sig'))
+            for resource in meta.get('resources', []):
+                path = destination / resource['id']['path']
+                data = parse_yy(path.read_text(encoding='utf-8-sig'))
+                if replace_refs(data, self.project.yyp.stem, self.project.yyp.name,
+                                run_name, run_name + '.yyp'):
+                    path.write_bytes(encode(data))
+            replace_refs(meta, self.project.yyp.stem, self.project.yyp.name, run_name, run_name + '.yyp')
             meta.update(name=run_name, **{'%Name': run_name})
             (destination / self.project.yyp.name).unlink()
             yyp = destination / (run_name + '.yyp')
@@ -338,17 +453,18 @@ class Runtime:
             except OSError:
                 pass
 
-    def run(self, dry_run=True):
+    def run(self, dry_run=True, compile_only=False):
         with self.guard:
             root, user, igor, sandbox = self._configuration()
             if self.session and not self.session.get('stopped'):
                 raise ValueError('已有运行会话，请先 stop_game；即使进程已退出也先读取日志')
-            key = self._bridge()
+            key = None if compile_only else self._bridge()
             validation = self.project.validate()
             if not validation['ok']:
                 raise ValueError('项目结构检查失败，先调用 inspect_project')
             preview = {'dry_run': dry_run, 'project': str(self.project.yyp), 'target': 'Windows VM',
-                       'isolated_project': True, 'isolated_save_directory': True}
+                       'isolated_project': True, 'isolated_save_directory': True,
+                       'compile_only': compile_only}
             if dry_run:
                 return preview
             session_id = uuid4().hex
@@ -358,7 +474,8 @@ class Runtime:
             savedir = child_path(sandbox, run_name)
             bridge_directory = savedir / 'morx_mcp'
             session = {'id': session_id, 'bridge': key, 'bridge_directory': bridge_directory,
-                'directory': directory, 'save_directory': savedir, 'stopped': False}
+                'directory': directory, 'save_directory': savedir, 'stopped': False,
+                'compile_only': compile_only}
             self.redactions = [str(user), str(root), str(self.project.root),
                                str(sandbox), str(savedir), str(Path.home())]
             try:
@@ -374,8 +491,11 @@ class Runtime:
                 # 传 /of 会让 Runner 去加载错误的输出文件名。
                 args = [str(igor), '/uf=' + str(user), '/rp=' + str(root), '/project=' + str(yyp),
                     '/cache=' + str(directory / 'cache'), '/temp=' + str(directory / 'temp'),
-                    '/runtime=VM', '--', 'Windows', 'Run']
+                    '/runtime=VM', '--', 'Windows', 'Compile' if compile_only else 'Run']
+                session['launch_args'] = args
                 self.session, self.pending = session, None
+                self.heartbeat = self.pending_since = None
+                self.build_diagnostics.clear()
                 self.lines.clear()
                 self.sequence = 0
                 self.process = subprocess.Popen(args, cwd=directory, stdin=subprocess.DEVNULL,
@@ -395,7 +515,7 @@ class Runtime:
             self.timer.start()
             return {**preview, 'session_id': session_id, 'state': 'building_or_starting',
                 'snapshot_project': str(yyp), 'save_directory': str(savedir), 'compiled': False,
-                'next': '查询 runtime_status；bridge_ready=true 后可截图和检查状态'}
+                'next': '查询 runtime_status；compile_only 以退出码 0 确认编译成功，运行以 bridge_ready 确认就绪'}
 
     def _collect(self, process):
         buffer = ''
@@ -408,18 +528,23 @@ class Runtime:
                 rows = buffer.split('\n')
                 buffer = rows.pop()[-16384:]
                 for row in rows:
-                    self._log(row[:16384])
+                    self._log(row[:16384], process)
             if buffer:
-                self._log(buffer)
+                self._log(buffer, process)
         finally:
             process.stdout.close()
 
-    def _log(self, line):
+    def _log(self, line, process=None):
         if re.search(r'(?i)licen[cs]e|access.?key|api.?key|secret|token|password|authorization|authentication', line):
             line = '[credential-related output omitted]'
         else:
             line = self._redact(line)
         with self.guard:
+            if process is not None and process is not self.process:
+                return
+            if re.search(r'(?i)\b(?:error|fatal)\b|\bat line \d+\s*:', line) and not re.search(
+                    r'(?i)\b(?:no errors|0 errors|error_count|errors?\s*[:=]\s*0)\b', line):
+                self.build_diagnostics.append(line[:2048])
             self.sequence += 1
             self.lines.append({'cursor': self.sequence, 'text': line.rstrip('\r')})
 
@@ -437,14 +562,16 @@ class Runtime:
         with self.guard:
             self._require_session(session_id)
             if command not in {'state', 'capture', 'input', 'wait', 'event',
-                               'set', 'spawn', 'destroy'}:
+                               'set', 'spawn', 'destroy', 'mouse_trace'}:
                 raise ValueError('不支持的运行请求')
-            if not self._ready():
-                raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
             if self.pending:
                 raise ValueError('上个请求结果尚未确认；先查询 runtime_status，不要重试有副作用的操作')
+            readiness = self._readiness()
+            if not readiness['ready']:
+                raise ValueError('游戏桥接未就绪：' + readiness['reason'] + '；查询 runtime_status 和 get_runtime_output')
             request_id = uuid4().hex
             self.pending = request_id
+            self.pending_since = time.monotonic()
             atomic_json(self._file('request.json'), {'session': session_id, 'request': request_id,
                 'command': command, 'args': arguments or {}})
         deadline = time.monotonic() + timeout
@@ -494,16 +621,26 @@ class Runtime:
         return object_name, variables, limit, scope, instance_id
 
     def inspect(self, session_id, object_name='', variables=None, limit=32,
-                scope='instances', instance_id=None):
+                scope='instances', instance_id=None, max_depth=3):
+        integer(max_depth, 'max_depth', 1, 8)
         object_name, variables, limit, scope, instance_id = self._state_args(
             object_name, variables, limit, scope, instance_id)
         args = {'object_name': object_name, 'variables': variables, 'limit': limit,
-                'scope': scope}
+                'scope': scope, 'max_depth': max_depth}
         if instance_id is not None:
             args['instance_id'] = instance_id
         result = self.request(session_id, 'state', args)
         if isinstance(result.get('data'), dict) and 'error' in result['data']:
             raise ValueError(self._redact(str(result['data']['error'])))
+        if 'bridge_io' in result.get('data', {}):
+            result['data']['bridge_io'] = bridge_io_summary(result['data']['bridge_io'])
+        if result.get('data', {}).get('window_width'):
+            from . import win_mouse
+            try:
+                window = win_mouse.find_game_window(self.process.pid, 'MORX_Run_' + session_id)
+                result['data']['input_coordinates'] = win_mouse.coordinate_metrics(window, result['data'])
+            except (OSError, ValueError) as exc:
+                result['data']['input_coordinates_error'] = self._redact(str(exc))
         return result
 
     @staticmethod
@@ -753,6 +890,9 @@ class Runtime:
             step.get('scope', 'instances'), step.get('instance_id'))
         normalized = {'action': 'state', 'object_name': object_name,
                       'variables': variables, 'limit': limit, 'scope': scope}
+        if 'max_depth' in step:
+            integer(step['max_depth'], 'max_depth', 1, 8)
+            normalized['max_depth'] = step['max_depth']
         if instance_id is not None:
             normalized['instance_id'] = instance_id
         return normalized
@@ -794,7 +934,7 @@ class Runtime:
                 elif action == 'state':
                     data = self.inspect(session_id, step['object_name'],
                                         step['variables'], step['limit'], step['scope'],
-                                        step.get('instance_id'))
+                                        step.get('instance_id'), step.get('max_depth', 3))
                 elif action in ('set', 'spawn', 'destroy'):
                     data = self.request(session_id, action,
                                         {key: value for key, value in step.items()
@@ -832,6 +972,8 @@ class Runtime:
             self._require_session(session_id)
             if not dry_run and mode == 'message' and not self._ready():
                 raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
+            if not dry_run and self.pending:
+                raise ValueError('上个请求结果尚未确认；先查询 runtime_status，不要重复输入')
         preview = {'dry_run': dry_run, 'session_id': session_id, 'keys': keys,
                    'frames': frames, 'mode': mode}
         if dry_run:
@@ -856,13 +998,37 @@ class Runtime:
                             timeout=max(15, frames / 10 + 10))
 
     def mouse(self, session_id, action, x=None, y=None, button='left', delta=0,
-              hold_ms=50, mode='message', dry_run=True):
+              hold_ms=50, mode='message', dry_run=True, coordinate_space='client',
+              end_x=None, end_y=None, duration_ms=500, steps=20, settle_frames=2):
+        # 整个消息序列与逐帧记录属于同一动作，拒绝并发鼠标调用相互覆盖。
+        if not self.mouse_guard.acquire(blocking=False):
+            raise ValueError('上个鼠标动作尚未完成；等待原操作结果，不要并发或重复输入')
+        try:
+            return self._mouse(session_id, action, x, y, button, delta, hold_ms, mode, dry_run,
+                               coordinate_space, end_x, end_y, duration_ms, steps, settle_frames)
+        finally:
+            self.mouse_guard.release()
+
+    def _mouse(self, session_id, action, x, y, button, delta, hold_ms, mode, dry_run,
+               coordinate_space, end_x, end_y, duration_ms, steps, settle_frames):
         """向本次运行的游戏窗口投递鼠标动作；坐标为窗口客户区像素。
         默认 mode=message 使用窗口消息，不移动真实光标、不要求前台焦点；
         mode=physical 才使用系统级注入。
         """
-        if action not in {'move', 'click', 'wheel'}:
-            raise ValueError('鼠标动作须为 move、click 或 wheel')
+        if action not in {'move', 'click', 'wheel', 'drag'}:
+            raise ValueError('鼠标动作须为 move、click、wheel 或 drag')
+        if coordinate_space not in {'client', 'physical', 'window', 'gui'}:
+            raise ValueError('coordinate_space 须为 client、physical、window 或 gui')
+        integer(settle_frames, 'settle_frames', 0, 30)
+        if action == 'drag':
+            if mode != 'message':
+                raise ValueError('drag 仅支持窗口消息模式')
+            integer(end_x, 'end_x', 0, 32768)
+            integer(end_y, 'end_y', 0, 32768)
+            integer(duration_ms, 'duration_ms', 50, 3000)
+            integer(steps, 'steps', 2, 60)
+        elif end_x is not None or end_y is not None:
+            raise ValueError('只有 drag 支持 end_x/end_y')
         if button not in {'left', 'right', 'middle'}:
             raise ValueError('鼠标按钮须为 left、right 或 middle')
         if mode not in {'message', 'physical'}:
@@ -880,27 +1046,100 @@ class Runtime:
         if x is not None:
             integer(x, 'x', 0, 32768)
             integer(y, 'y', 0, 32768)
-        elif action in {'move', 'click'}:
-            raise ValueError('move/click 必须提供 x 和 y')
+        elif action in {'move', 'click', 'drag'}:
+            raise ValueError('move/click/drag 必须提供 x 和 y')
         with self.guard:
             self._require_session(session_id)
             if not self._ready():
                 raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
+            if self.pending:
+                raise ValueError('上个请求结果尚未确认；先查询 runtime_status，不要重复输入')
         from . import win_mouse
         window = win_mouse.find_game_window(self.process.pid, 'MORX_Run_' + session_id)
-        if x is not None and not (x < window.width and y < window.height):
-            raise ValueError(f'坐标超出游戏窗口客户区 {window.width}×{window.height}')
+        engine = self.inspect(session_id, variables=[])['data'] if coordinate_space in {'window', 'gui'} else {}
+        metrics = win_mouse.coordinate_metrics(window, engine)
+        requested = {'x': x, 'y': y, 'end_x': end_x, 'end_y': end_y}
+        if x is not None:
+            x, y = win_mouse.convert_point(x, y, coordinate_space, metrics)
+        if action == 'drag':
+            end_x, end_y = win_mouse.convert_point(end_x, end_y, coordinate_space, metrics)
         preview = {'session_id': session_id, 'action': action, 'x': x, 'y': y,
-                   'button': button if action == 'click' else None,
+                   'button': button if action in {'click', 'drag'} else None,
                    'delta': delta if action == 'wheel' else 0, 'mode': mode,
-                   'window': {'width': window.width, 'height': window.height}}
+                   'window': {'width': window.width, 'height': window.height},
+                   'coordinate_space': coordinate_space, 'requested': requested,
+                   'coordinates': metrics, 'end_x': end_x, 'end_y': end_y,
+                   'settle_frames': settle_frames}
         if dry_run:
             return {'dry_run': True, **preview}
-        if mode == 'message':
-            point = win_mouse.send_mouse_message(window, action, x, y, button, delta, hold_ms)
-        else:
-            point = win_mouse.send_mouse(window, action, x, y, button, delta, hold_ms)
-        return {'dry_run': False, **preview, 'cursor': point}
+        traced = mode == 'message' and action in {'click', 'drag'}
+        dispatch = []
+        trace_id = uuid4().hex
+        dispatch_started = time.monotonic()
+
+        def record_dispatch(message, flags, position):
+            # 只记录本次工具投递的消息；投递顺序不冒充引擎处理顺序。
+            dispatch.append({'order': len(dispatch) + 1, 'message': message,
+                             'client_x': position & 0xFFFF, 'client_y': (position >> 16) & 0xFFFF,
+                             'button_flags': flags, 'elapsed_ms': round((time.monotonic() - dispatch_started) * 1000, 3)})
+
+        if traced:
+            self.request(session_id, 'mouse_trace', {'phase': 'begin', 'trace_id': trace_id, 'button': button})
+        if mode == 'message' and action in {'click', 'drag'} and settle_frames:
+            win_mouse.send_mouse_message(window, 'move', x, y, on_dispatch=record_dispatch)
+            self.wait(session_id, settle_frames)
+        result = {'dry_run': False, **preview, 'input_dispatched': False, 'dispatch_complete': False}
+        try:
+            if action == 'drag':
+                point = win_mouse.drag_message(window, x, y, end_x, end_y, button, duration_ms, steps,
+                                               on_dispatch=record_dispatch)
+            elif mode == 'message':
+                point = win_mouse.send_mouse_message(window, action, x, y, button, delta, hold_ms,
+                                                     on_dispatch=record_dispatch if traced else None)
+            else:
+                point = win_mouse.send_mouse(window, action, x, y, button, delta, hold_ms)
+            result.update(cursor=point, input_dispatched=True, dispatch_complete=True)
+        except (ValueError, OSError) as exc:
+            if not traced:
+                raise
+            result['input_dispatched'] = bool(dispatch)
+            result['dispatch_error'] = self._redact(str(exc))
+        if traced:
+            result['mouse_trace'] = {'trace_id': trace_id, 'dispatch': dispatch,
+                                    'game_effect': 'unknown', 'automatic_replay': False}
+        try:
+            self.wait(session_id, 1)
+            if traced:
+                trace = self.request(session_id, 'mouse_trace', {'phase': 'end', 'trace_id': trace_id})
+                if trace.get('data', {}).get('trace_id') != trace_id:
+                    raise ValueError('鼠标记录身份不匹配，不能确认本次输入采样')
+                result['mouse_trace']['engine'] = trace['data']
+            snapshot = self.inspect(session_id, variables=[])
+            result['observed_mouse'] = snapshot.get('data', {}).get('mouse')
+            result['observation_frame'] = snapshot.get('frame')
+        except ValueError as exc:
+            result['observation_error'] = self._redact(str(exc))
+        return result
+
+    def save_capture(self, session_id, filename, dry_run=True):
+        if not isinstance(filename, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}\.png', filename):
+            raise ValueError('filename 须为 1～80 位英文、数字、下划线或连字符及 .png 后缀')
+        if not self.project.writable and not dry_run:
+            raise ValueError('导出截图需要 --write')
+        relative = '.codex/morx-captures/' + filename
+        target = self.project.path(relative)
+        with self.guard:
+            self._require_session(session_id)
+            if target.exists():
+                raise ValueError('截图导出拒绝覆盖已有文件')
+            if dry_run:
+                return {'dry_run': True, 'path': relative}
+            result = self.request(session_id, 'capture')
+            target = self.project.path(relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open('xb') as output:
+                output.write(result.pop('image'))
+            return {**result, 'path': relative, 'dry_run': False}
 
     def _capture_bytes(self, request_id):
         path = self._file('capture_' + request_id + '.png')
@@ -919,12 +1158,14 @@ class Runtime:
         finally:
             path.unlink(missing_ok=True)
 
-    def stop(self, session_id, dry_run=True):
+    def stop(self, session_id, dry_run=True, _preserve=False):
         with self.guard:
             session = self._require_session(session_id)
             if dry_run:
                 return {'dry_run': True, 'session_id': session_id, 'action': 'stop_owned_session'}
             errors = self._errors()
+            self._readiness()
+            io_status = self._io_status()
             if not session.get('stopped'):
                 # 删除会话文件本身就是桥接的退出信号，下一帧 BeginStep 会结束游戏。
                 self._file('session.json').unlink(missing_ok=True)
@@ -950,10 +1191,47 @@ class Runtime:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=3)
-        self._cleanup(session)
+        if not _preserve:
+            self._cleanup(session)
         return {'session_id': session_id, 'stopped': True,
-                'exit_code': process.poll() if process else None, 'cleaned': True,
-                'error_count': len(errors), 'errors': errors}
+                'exit_code': process.poll() if process else None, 'cleaned': not _preserve,
+                'error_count': len(errors), 'errors': errors, 'bridge_io': io_status}
+
+    def restart(self, session_id, dry_run=True):
+        """同一隔离副本重新执行 Igor Run；保留存档，不接管或拼接外部 Runner 命令。"""
+        with self.guard:
+            session = self._require_session(session_id)
+            if session.get('stopped') or session.get('compile_only'):
+                raise ValueError('restart_game 只接受尚未停止的受管运行会话')
+            preview = {'dry_run': dry_run, 'session_id': session_id,
+                       'preserve_save': True, 'uses_existing_snapshot': True,
+                       'rebuilds_snapshot': True}
+            if dry_run:
+                return preview
+            self._configuration()
+            self.stop(session_id, dry_run=False, _preserve=True)
+            try:
+                for name in ('ready.json', 'ready.json.tmp', 'response.json', 'response.json.tmp',
+                             'request.json', 'errors.json', 'errors.json.tmp'):
+                    self._file(name).unlink(missing_ok=True)
+                atomic_json(self._file('session.json'), {'session': session_id, 'bridge': session['bridge']})
+                self.heartbeat = self.pending_since = None
+                self.pending = None
+                self.build_diagnostics.clear()
+                session.pop('build_succeeded', None)
+                self.process = subprocess.Popen(session['launch_args'], cwd=session['directory'],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                session['stopped'] = False
+                threading.Thread(target=self._collect, args=(self.process,), daemon=True).start()
+                self.timer = threading.Timer(900, self._expire, args=(session_id,))
+                self.timer.daemon = True
+                self.timer.start()
+            except Exception:
+                # 启动失败仍保留副本与存档，允许读取日志后显式 stop_game 清理。
+                session['stopped'] = True
+                raise
+            return {**preview, 'state': 'building_or_starting', 'compiled': False}
 
     def _expire(self, session_id):
         try:

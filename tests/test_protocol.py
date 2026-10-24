@@ -10,6 +10,7 @@ from tests.test_core import ProjectFixture
 from tests.test_display import windows_fixture
 from morx_gms2_mcp.display import WINDOWS_PATH
 from morx_gms2_mcp.storage import encode
+from tests.test_audio import make_wav
 
 
 class ProtocolTests(ProjectFixture):
@@ -19,6 +20,12 @@ class ProtocolTests(ProjectFixture):
         self.project.import_sprite('spr_protocol', [str(png), str(png)])
         sprite_file = self.root / 'sprites/spr_protocol/spr_protocol.yy'
         original = sprite_file.read_bytes()
+        resized_png = self.root / 'resized.png'
+        Image.new('RGBA', (8, 6), (100, 200, 80, 255)).save(resized_png)
+        wav = make_wav(self.root / 'protocol.wav')
+        self.project.import_sound('snd_protocol', str(wav))
+        sound_file = self.root / 'sounds/snd_protocol/snd_protocol.yy'
+        original_sound = sound_file.read_bytes()
         self.project.create_room('rm_display_protocol', 800, 450)
         self.project.set_start_room('rm_display_protocol')
         windows_file = self.root / WINDOWS_PATH
@@ -37,11 +44,11 @@ class ProtocolTests(ProjectFixture):
                     init = await session.initialize()
                     self.assertEqual(init.serverInfo.name, 'morx-gms2-mcp')
                     tools = (await session.list_tools()).tools
-                    self.assertEqual(len(tools), 51)
+                    self.assertEqual(len(tools), 58)
                     self.assertTrue({'inspect_sprite', 'configure_sprite', 'set_sprite_animation',
                                      'set_game_variables', 'spawn_game_instance',
                                      'destroy_game_instance', 'remove_object_event',
-                                     'import_font'}.issubset({tool.name for tool in tools}))
+                                     'import_font', 'inspect_sound', 'configure_sound'}.issubset({tool.name for tool in tools}))
                     for tool in tools:
                         self.assertIsNotNone(tool.annotations)
                         if not tool.annotations.readOnlyHint:
@@ -52,6 +59,22 @@ class ProtocolTests(ProjectFixture):
                         return json.loads(result.content[0].text) if not error else None
                     self.assertEqual((await call('server_info', {}))['writable'], writable)
                     self.assertFalse((await call('runtime_status', {}))['enabled'])
+                    sound = await call('inspect_sound', {'name': 'snd_protocol'})
+                    audio_options = {'name': 'snd_protocol', 'expected_sha256': sound['sha256'],
+                                     'compression': 'streamed', 'preload': True, 'compression_quality': 7}
+                    self.assertTrue((await call('configure_sound', audio_options))['dry_run'])
+                    preview = await call('import_sound', {'name': 'snd_preview', 'audio_path': str(wav),
+                        'compression': 'decompress_on_load', 'preload': True, 'conversion_mode': 'required'})
+                    self.assertEqual(preview['settings']['compression'], 'decompress_on_load')
+                    await call('configure_sound', {**audio_options, 'compression': 'invalid'}, True)
+                    if writable:
+                        result = await call('configure_sound', {**audio_options, 'dry_run': False})
+                        self.assertTrue((await call('inspect_sound', {'name': 'snd_protocol'}))['settings']['streamed'])
+                        await call('configure_sound', {**audio_options, 'dry_run': False}, True)
+                        await call('restore_backup', {'transaction_id': result['transaction'], 'dry_run': False})
+                    else:
+                        await call('configure_sound', {**audio_options, 'dry_run': False}, True)
+                    self.assertEqual(sound_file.read_bytes(), original_sound)
                     await call('run_game', {}, True)
                     preview = await call('create_script', {'name': 'scr_protocol', 'code': '// 测试'})
                     self.assertTrue(preview['dry_run'])
@@ -70,6 +93,24 @@ class ProtocolTests(ProjectFixture):
                     else:
                         await call('create_script', {'name': 'scr_protocol', 'dry_run': False}, True)
                     sprite = await call('inspect_sprite', {'name': 'spr_protocol'})
+                    replacement = {'name': 'spr_protocol', 'png_paths': [str(png)] * 2,
+                                   'expected_sha256': sprite['sha256'],
+                                   'expected_image_sha256': sprite['image_sha256']}
+                    self.assertTrue((await call('replace_sprite_images', replacement))['dry_run'])
+                    resizing = {**replacement, 'png_paths': [str(resized_png)]*2,
+                                'allow_resize': True, 'origin_policy': 'scale', 'bbox_policy': 'full_image'}
+                    self.assertTrue((await call('replace_sprite_images', resizing))['resized'])
+                    if writable:
+                        result = await call('replace_sprite_images', {**resizing, 'dry_run': False})
+                        resized = await call('inspect_sprite', {'name': 'spr_protocol'})
+                        self.assertEqual((resized['width'], resized['height']), (8, 6))
+                        await call('restore_backup', {'transaction_id': result['transaction'], 'dry_run': False})
+                        self.assertEqual(sprite_file.read_bytes(), original)
+                    else:
+                        await call('replace_sprite_images', {**resizing, 'dry_run': False}, True)
+                    await call('compile_game', {}, True)  # 没有 --allow-run 时不能启动编译器。
+                    if not writable:
+                        await call('replace_sprite_images', {**replacement, 'dry_run': False}, True)
                     order = [f['frame_id'] for f in sprite['frames']][::-1]
                     options = {'name': 'spr_protocol', 'speed': 24, 'origin_x': -1,
                                'expected_sha256': sprite['sha256']}

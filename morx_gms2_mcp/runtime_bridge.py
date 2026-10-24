@@ -47,13 +47,122 @@ mcp_capture = undefined;
 mcp_keys = [];
 mcp_until = 0;
 mcp_started = current_time;
+mcp_write_pending = [];
+mcp_write_failures = 0;
+mcp_write_stats = {};
+mcp_io_snapshot = function() {
+    var files = [];
+    var retry_total = 0;
+    var recovery_total = 0;
+    var stalled_total = 0;
+    var known_names = ["ready.json","response.json","errors.json"];
+    for (var di=0;di<array_length(known_names);di++) {
+        var diagnostic_name = known_names[di];
+        if (!variable_struct_exists(mcp_write_stats,diagnostic_name)) continue;
+        var diagnostic = variable_struct_get(mcp_write_stats,diagnostic_name);
+        var pending_age = diagnostic.pending_since_ms < 0 ? 0 : max(0,current_time-diagnostic.pending_since_ms);
+        var pending_now = array_contains(mcp_write_pending,diagnostic_name);
+        var state_name = pending_now ? (pending_age>=10000 ? "stalled" : "retrying")
+            : (diagnostic.recovery_count>0 ? "recovered" : "healthy");
+        if (pending_now && pending_age>=10000) stalled_total++;
+        retry_total += diagnostic.retry_attempts;
+        recovery_total += diagnostic.recovery_count;
+        array_push(files,{file:diagnostic_name,state:state_name,pending:pending_now,
+            pending_age_ms:pending_age,retry_attempts:diagnostic.retry_attempts,
+            current_retry_attempts:diagnostic.current_retry_attempts,recovery_count:diagnostic.recovery_count,
+            last_recovery_attempts:diagnostic.last_recovery_attempts,
+            first_failure_frame:diagnostic.first_failure_frame,last_failure_frame:diagnostic.last_failure_frame,
+            last_recovery_frame:diagnostic.last_recovery_frame,last_failure_stage:diagnostic.last_failure_stage,
+            request:diagnostic.request,last_failure_request:diagnostic.last_failure_request,
+            last_recovery_request:diagnostic.last_recovery_request});
+    }
+    return {state:stalled_total>0 ? "stalled" : (array_length(mcp_write_pending)>0 ? "retrying"
+            : (retry_total>0 ? "recovered" : "healthy")),
+        pending_writes:array_length(mcp_write_pending),stalled_writes:stalled_total,
+        retry_attempts:retry_total,retry_recoveries:recovery_total,
+        write_failures:retry_total,write_failures_semantics:"retry_attempts_not_final_failures",
+        sample_frame:mcp_frame,stall_threshold_ms:10000,files:files};
+};
+mcp_last_mouse_press = undefined;
+mcp_last_mouse_release = undefined;
+mcp_mouse_trace = undefined;
+mcp_mouse_sample = function(_button) {
+    return {frame:mcp_frame,window_x:window_mouse_get_x(),window_y:window_mouse_get_y(),
+        gui_x:device_mouse_x_to_gui(0),gui_y:device_mouse_y_to_gui(0),
+        down:mouse_check_button(_button),pressed:mouse_check_button_pressed(_button),
+        released:mouse_check_button_released(_button)};
+};
+mcp_sample_mouse_trace = function() {
+    if (is_undefined(mcp_mouse_trace) || !mcp_mouse_trace.active) return;
+    var trace_sample = mcp_mouse_sample(mcp_mouse_trace.button_code);
+    trace_sample.elapsed_ms = max(0,current_time-mcp_mouse_trace.started_ms);
+    if (array_length(mcp_mouse_trace.samples)>=128) {
+        // 保留首帧及最近 127 帧；按下/释放另存，不因截断丢失。
+        array_delete(mcp_mouse_trace.samples,1,1);
+        mcp_mouse_trace.dropped_samples++;
+    }
+    array_push(mcp_mouse_trace.samples,trace_sample);
+    if (trace_sample.pressed) mcp_mouse_trace.press = trace_sample;
+    if (trace_sample.released) mcp_mouse_trace.release = trace_sample;
+    if (trace_sample.elapsed_ms>=10000) {
+        mcp_mouse_trace.active = false;
+        mcp_mouse_trace.expired = true;
+        mcp_mouse_trace.end_frame = mcp_frame;
+    }
+};
+mcp_flush_writes = function() {
+    var remaining = [];
+    for (var wi=0;wi<array_length(mcp_write_pending);wi++) {
+        var write_name = mcp_write_pending[wi];
+        var write_temp = mcp_directory+write_name+".tmp";
+        var write_dest = mcp_directory+write_name;
+        var write_stat = variable_struct_get(mcp_write_stats,write_name);
+        if (!file_exists(write_temp)) {
+            // 保留诊断，不把临时文件缺失误报为已经恢复；不重新执行原命令。
+            write_stat.last_failure_stage = "temporary_file_missing";
+            array_push(remaining,write_name);
+            continue;
+        }
+        if (file_exists(write_dest)) file_delete(write_dest);
+        if (!file_rename(write_temp,write_dest)) {
+            array_push(remaining,write_name);
+            mcp_write_failures++;
+            write_stat.retry_attempts++;
+            write_stat.current_retry_attempts++;
+            if (write_stat.first_failure_frame<0) write_stat.first_failure_frame=mcp_frame;
+            write_stat.last_failure_frame=mcp_frame;
+            write_stat.last_failure_request=write_stat.request;
+            write_stat.last_failure_stage=file_exists(write_dest) ? "replace_destination" : "promote_temporary";
+        } else {
+            if (write_stat.current_retry_attempts>0) {
+                write_stat.recovery_count++;
+                write_stat.last_recovery_attempts=write_stat.current_retry_attempts;
+                write_stat.last_recovery_frame=mcp_frame;
+                write_stat.last_recovery_request=write_stat.request;
+            }
+            write_stat.current_retry_attempts=0;
+            write_stat.pending_since_ms=-1;
+        }
+    }
+    mcp_write_pending = remaining;
+};
 mcp_write = function(_name,_value) {
+    if (!variable_struct_exists(mcp_write_stats,_name)) {
+        variable_struct_set(mcp_write_stats,_name,{retry_attempts:0,current_retry_attempts:0,recovery_count:0,
+            last_recovery_attempts:0,pending_since_ms:-1,first_failure_frame:-1,last_failure_frame:-1,
+            last_recovery_frame:-1,last_failure_stage:"",request:"",last_failure_request:"",last_recovery_request:""});
+    }
+    var write_stat = variable_struct_get(mcp_write_stats,_name);
+    if (!array_contains(mcp_write_pending,_name)) write_stat.pending_since_ms=current_time;
+    if (_name=="response.json" && variable_struct_exists(_value,"request")) {
+        write_stat.request=string_copy(string(_value.request),1,32);
+    }
     var temp_name = mcp_directory + _name + ".tmp";
     var dest_name = mcp_directory + _name;
     var h = file_text_open_write(temp_name);
     file_text_write_string(h,json_stringify(_value)); file_text_close(h);
-    if (file_exists(dest_name)) file_delete(dest_name);
-    file_rename(temp_name,dest_name);
+    if (!array_contains(mcp_write_pending,_name)) array_push(mcp_write_pending,_name);
+    mcp_flush_writes();
 };
 mcp_reply = function(_request,_ok,_data) {
     mcp_write("response.json",{session:mcp_session.session,request:_request,
@@ -64,6 +173,7 @@ mcp_release = function() {
     mcp_keys = [];
 };
 mcp_value = function(_value,_depth,_budget) {
+    var depth_limit = variable_struct_exists(_budget,"depth") ? _budget.depth : 3;
     if (_budget.left <= 0) return {type:"truncated"};
     _budget.left -= 1;
     if (is_undefined(_value)) return {type:"undefined"};
@@ -75,7 +185,7 @@ mcp_value = function(_value,_depth,_budget) {
     if (is_string(_value)) return string_copy(_value,1,1024);
     if (is_array(_value)) {
         var array_length_value = array_length(_value);
-        if (_depth >= 3) return {type:"array",length:array_length_value,items:[],truncated:true};
+        if (_depth >= depth_limit) return {type:"array",length:array_length_value,items:[],truncated:true};
         var items = [];
         var array_take = min(array_length_value,32);
         for (var ai=0;ai<array_take;ai++) {
@@ -88,7 +198,7 @@ mcp_value = function(_value,_depth,_budget) {
     if (is_struct(_value)) {
         var names = variable_struct_get_names(_value);
         var struct_length_value = array_length(names);
-        if (_depth >= 3) return {type:"struct",length:struct_length_value,values:{},truncated:true};
+        if (_depth >= depth_limit) return {type:"struct",length:struct_length_value,values:{},truncated:true};
         var values = {};
         var struct_take = min(struct_length_value,32);
         var struct_count = 0;
@@ -105,19 +215,24 @@ mcp_value = function(_value,_depth,_budget) {
     return {type:"complex"};
 };
 mcp_snapshot = function(_args) {
+    var read_depth = variable_struct_exists(_args,"max_depth") ? clamp(_args.max_depth,1,8) : 3;
     var scope = "instances";
     if (variable_struct_exists(_args,"scope")) scope = _args.scope;
     var base = {room:room_get_name(room),room_width:room_width,room_height:room_height,
         window_width:window_get_width(),window_height:window_get_height(),
         gui_width:display_get_gui_width(),gui_height:display_get_gui_height(),
-        frame:mcp_frame,fps:fps_real,scope:scope};
+        frame:mcp_frame,fps:fps_real,scope:scope,
+        mouse:{window_x:window_mouse_get_x(),window_y:window_mouse_get_y(),
+            gui_x:device_mouse_x_to_gui(0),gui_y:device_mouse_y_to_gui(0),
+            last_press:mcp_last_mouse_press,last_release:mcp_last_mouse_release,trace:mcp_mouse_trace},
+        bridge_io:mcp_io_snapshot()};
     if (scope == "globals") {
         var globals = {};
         for (var gj=0;gj<array_length(_args.variables);gj++) {
             var global_field = _args.variables[gj];
             if (variable_global_exists(global_field)) {
                 variable_struct_set(globals,global_field,
-                    mcp_value(variable_global_get(global_field),0,{left:64}));
+                    mcp_value(variable_global_get(global_field),0,{left:64,depth:read_depth}));
             } else variable_struct_set(globals,global_field,{type:"missing"});
         }
         base.globals = globals;
@@ -142,7 +257,7 @@ mcp_snapshot = function(_args) {
             var one_field = _args.variables[sj];
             if (variable_instance_exists(target_instance,one_field)) {
                 variable_struct_set(one_values,one_field,
-                    mcp_value(variable_instance_get(target_instance,one_field),0,{left:64}));
+                    mcp_value(variable_instance_get(target_instance,one_field),0,{left:64,depth:read_depth}));
             } else variable_struct_set(one_values,one_field,{type:"missing"});
         }
         base.instances = [{id:target_instance.id,
@@ -161,7 +276,7 @@ mcp_snapshot = function(_args) {
             var field = _args.variables[j];
             if (variable_instance_exists(inst,field)) {
                 variable_struct_set(values,field,
-                    mcp_value(variable_instance_get(inst,field),0,{left:64}));
+                    mcp_value(variable_instance_get(inst,field),0,{left:64,depth:read_depth}));
             } else variable_struct_set(values,field,{type:"missing"});
         }
         array_push(rows,{id:inst.id,object_name:object_get_name(inst.object_index),values:values});
@@ -213,10 +328,22 @@ try {
             _exception.script,_exception.line,_exception.stacktrace);
     });
 } catch (err) {}
-mcp_write("ready.json",{session:mcp_session.session,bridge:mcp_session.bridge,frame:0});
+mcp_write("ready.json",{session:mcp_session.session,bridge:mcp_session.bridge,frame:0,bridge_io:mcp_io_snapshot()});
 '''.replace('__KEY__', key)
     begin = r'''
 mcp_frame++;
+mcp_flush_writes();
+if (mouse_check_button_pressed(mb_left) || mouse_check_button_pressed(mb_right)
+    || mouse_check_button_pressed(mb_middle)) {
+    mcp_last_mouse_press = {frame:mcp_frame,window_x:window_mouse_get_x(),window_y:window_mouse_get_y(),
+        gui_x:device_mouse_x_to_gui(0),gui_y:device_mouse_y_to_gui(0)};
+}
+if (mouse_check_button_released(mb_left) || mouse_check_button_released(mb_right)
+    || mouse_check_button_released(mb_middle)) {
+    mcp_last_mouse_release = {frame:mcp_frame,window_x:window_mouse_get_x(),window_y:window_mouse_get_y(),
+        gui_x:device_mouse_x_to_gui(0),gui_y:device_mouse_y_to_gui(0)};
+}
+mcp_sample_mouse_trace();
 if (current_time-mcp_started > 900000 || ((mcp_frame mod 5) == 0 && !file_exists(mcp_directory+"session.json"))) {
     mcp_release(); game_end(); exit;
 }
@@ -231,7 +358,7 @@ if (!is_undefined(mcp_pending) && mcp_frame>=mcp_until) {
     mcp_pending = undefined;
 }
 if ((mcp_frame mod 60) == 0) {
-    mcp_write("ready.json",{session:mcp_session.session,bridge:mcp_session.bridge,frame:mcp_frame});
+    mcp_write("ready.json",{session:mcp_session.session,bridge:mcp_session.bridge,frame:mcp_frame,bridge_io:mcp_io_snapshot()});
 }
 if (!file_exists(mcp_directory+"request.json")) exit;
 var request;
@@ -246,6 +373,25 @@ try {
         mcp_reply(request.request,false,{error:"Another command is pending"}); exit;
     }
     switch (request.command) {
+        case "mouse_trace":
+            if (request.args.phase == "begin") {
+                var trace_button = request.args.button;
+                var trace_button_code = trace_button == "right" ? mb_right
+                    : (trace_button == "middle" ? mb_middle : mb_left);
+                mcp_mouse_trace = {trace_id:request.args.trace_id,source:"BeginStep",
+                    button:trace_button,button_code:trace_button_code,active:true,expired:false,
+                    start_frame:mcp_frame,end_frame:mcp_frame,started_ms:current_time,
+                    capacity:128,dropped_samples:0,samples:[],press:undefined,release:undefined};
+                mcp_sample_mouse_trace();
+            } else if (request.args.phase == "end" && !is_undefined(mcp_mouse_trace)
+                && mcp_mouse_trace.trace_id == request.args.trace_id) {
+                mcp_mouse_trace.active = false;
+                mcp_mouse_trace.end_frame = mcp_frame;
+            } else {
+                mcp_reply(request.request,false,{error:"Mouse trace does not match"}); break;
+            }
+            mcp_reply(request.request,true,mcp_mouse_trace);
+            break;
         case "state":
             mcp_reply(request.request,true,mcp_snapshot(request.args));
             break;
@@ -424,7 +570,7 @@ try {
                 if (!window_has_focus()) {
                     mcp_reply(request.request,false,{error:"Game must have focus for keyboard input"}); break;
                 }
-                var allowed = [8,9,13,27,32,37,38,39,40];
+                var allowed = [8,9,13,27,32,33,34,35,36,37,38,39,40,45,46];
                 var valid = true;
                 if (array_length(request.args.keys)>8) valid = false;
                 for (var i=0;i<array_length(request.args.keys);i++) {

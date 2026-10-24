@@ -433,14 +433,20 @@ class RuntimeTests(ProjectFixture):
              patch('morx_gms2_mcp.win_mouse.send_mouse_message',
                    return_value={'screen_x': 30, 'screen_y': 40}) as message, \
              patch('morx_gms2_mcp.win_mouse.send_mouse',
-                   return_value={'screen_x': 10, 'screen_y': 20}) as physical:
+                   return_value={'screen_x': 10, 'screen_y': 20}) as physical, \
+             patch.object(self.runtime, 'wait', return_value={'data': {}, 'frame': 1}), \
+             patch.object(self.runtime, 'request', side_effect=lambda sid, cmd, args:
+                          {'data': {'trace_id': args['trace_id']}}), \
+             patch.object(self.runtime, 'inspect', return_value={'data': {}, 'frame': 1}):
             preview = self.runtime.mouse(self.session_id, 'click', 100, 200)
             self.assertTrue(preview['dry_run'])
             self.assertEqual(preview['mode'], 'message')
             message.assert_not_called()
             physical.assert_not_called()
-            result = self.runtime.mouse(self.session_id, 'click', 100, 200, dry_run=False)
-            message.assert_called_once_with(window, 'click', 100, 200, 'left', 0, 50)
+            result = self.runtime.mouse(self.session_id, 'click', 100, 200, dry_run=False, settle_frames=0)
+            self.assertEqual(message.call_args.args, (window, 'click', 100, 200, 'left', 0, 50))
+            self.assertEqual(message.call_count, 1)
+            self.assertTrue(callable(message.call_args.kwargs['on_dispatch']))
             physical.assert_not_called()
             self.assertEqual(result['cursor'], {'screen_x': 30, 'screen_y': 40})
             self.assertEqual(result['window'], {'width': 640, 'height': 360})
@@ -580,7 +586,7 @@ class RuntimeTests(ProjectFixture):
                                  variables=['score', 'inventory'])
         self.assertEqual(request.call_args.args[2], {
             'object_name': '', 'variables': ['score', 'inventory'],
-            'limit': 1, 'scope': 'globals'})
+            'limit': 1, 'scope': 'globals', 'max_depth': 3})
         for value in (100002, '100002', '@ref instance(100002)', 'instance(100002)'):
             with patch.object(self.runtime, 'request', return_value={'data': {}}) as request:
                 self.runtime.inspect('session', object_name='obj_player', instance_id=value)
@@ -701,7 +707,7 @@ class RuntimeTests(ProjectFixture):
     def test_bridge_serializes_globals_arrays_and_structs_with_bounds(self):
         bridge = ''.join(sources('a' * 32).values())
         for marker in ('variable_global_exists', 'variable_global_get',
-                       'variable_struct_get_names', '_budget.left', '_depth >= 3',
+                       'variable_struct_get_names', '_budget.left', '_depth >= depth_limit',
                        'min(array_length_value,32)', 'min(struct_length_value,32)',
                        '{left:64}', 'variable_global_set', 'variable_instance_set',
                        'variable_clone', 'instance_create_layer', 'instance_create_depth',
@@ -747,7 +753,7 @@ class RuntimeTests(ProjectFixture):
             server = build_server(self.root, runtime_options=self.options)
         async def verify():
             tools = await server.list_tools()
-            self.assertEqual(len(tools), 51)
+            self.assertEqual(len(tools), 58)
             for tool in tools:
                 if not tool.annotations.readOnlyHint:
                     self.assertTrue(tool.inputSchema['properties']['dry_run']['default'])

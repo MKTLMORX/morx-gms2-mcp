@@ -20,11 +20,12 @@ BUTTON_MESSAGES = {'left': (WM_LBUTTONDOWN, WM_LBUTTONUP, 0x0001),
 
 
 class Window:
-    __slots__ = ('handle', 'pid', 'title', 'width', 'height')
+    __slots__ = ('handle', 'pid', 'title', 'width', 'height', 'physical_width', 'physical_height')
 
     def __init__(self, handle, pid, title, width, height):
         self.handle, self.pid, self.title = handle, pid, title
         self.width, self.height = width, height
+        self.physical_width = self.physical_height = None
 
 
 class PROCESSENTRY32W(ctypes.Structure):
@@ -138,7 +139,47 @@ def find_game_window(root_pid, run_name):
     if not found:
         raise ValueError('未找到本次运行的可见游戏窗口；确认游戏已启动且未最小化')
     _, _, handle, pid, title, width, height = sorted(found)[0]
-    return Window(handle, pid, title, width, height)
+    window = Window(handle, pid, title, width, height)
+    # 只改变当前工作线程的 DPI 上下文，查询后立即恢复；不改变客户端进程的 DPI 设置。
+    if hasattr(user32, 'SetThreadDpiAwarenessContext'):
+        user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        previous = user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+        if previous:
+            try:
+                rect = wintypes.RECT()
+                if user32.GetClientRect(handle, ctypes.byref(rect)):
+                    window.physical_width, window.physical_height = rect.right, rect.bottom
+            finally:
+                user32.SetThreadDpiAwarenessContext(previous)
+    return window
+
+
+def coordinate_metrics(window, engine=None):
+    """client 是 MCP 调用线程看到的 Win32 客户区；physical 独立查询，不能假定固定 DPI。"""
+    engine = engine or {}
+    sizes = {'client': {'width': window.width, 'height': window.height}}
+    for space, width, height in (
+            ('physical', getattr(window, 'physical_width', None), getattr(window, 'physical_height', None)),
+            ('window', engine.get('window_width'), engine.get('window_height')),
+            ('gui', engine.get('gui_width'), engine.get('gui_height'))):
+        if type(width) in (int, float) and type(height) in (int, float) and width > 0 and height > 0:
+            sizes[space] = {'width': width, 'height': height,
+                            'to_client_x': window.width / width, 'to_client_y': window.height / height}
+    return {'spaces': sizes, 'default_space': 'client',
+            'logical_client': sizes['client'],
+            'gui_mapping': 'proportional_full_client; custom GUI offsets require client coordinates'}
+
+
+def convert_point(x, y, space, metrics):
+    if space not in metrics['spaces']:
+        raise ValueError('当前无法取得该坐标空间的尺寸：' + space)
+    size = metrics['spaces'][space]
+    if not (0 <= x < size['width'] and 0 <= y < size['height']):
+        raise ValueError(f"坐标超出 {space} 范围 {size['width']}×{size['height']}")
+    client = metrics['spaces']['client']
+    return (min(client['width'] - 1, int(x * client['width'] / size['width'])),
+            min(client['height'] - 1, int(y * client['height'] / size['height'])))
 
 
 def _focus(user32, kernel32, handle):
@@ -197,18 +238,21 @@ def send_mouse(window, action, x=None, y=None, button='left', delta=0, hold_ms=5
     return {'screen_x': point.x, 'screen_y': point.y}
 
 
-def _post(user32, handle, message, wparam=0, lparam=0):
+def _post(user32, handle, message, wparam=0, lparam=0, on_dispatch=None):
     if not user32.PostMessageW(handle, message, wparam, lparam):
         code = ctypes.get_last_error()
         detail = f'（WinError {code}）' if code else ''
         raise ValueError('无法向游戏窗口投递鼠标消息' + detail)
+    if on_dispatch is not None:
+        on_dispatch(message, wparam, lparam)
 
 
 def _lparam(x, y):
     return ((y & 0xFFFF) << 16) | (x & 0xFFFF)
 
 
-def send_mouse_message(window, action, x=None, y=None, button='left', delta=0, hold_ms=50):
+def send_mouse_message(window, action, x=None, y=None, button='left', delta=0, hold_ms=50,
+                       on_dispatch=None):
     """向游戏窗口投递 WM_MOUSE* 消息；不移动真实光标、不切换前台窗口。
     x/y 为窗口客户区像素；滚轮省略坐标时使用客户区中心。
     """
@@ -222,7 +266,7 @@ def send_mouse_message(window, action, x=None, y=None, button='left', delta=0, h
     screen = wintypes.POINT(x, y)
     if not user32.ClientToScreen(window.handle, ctypes.byref(screen)):
         raise ValueError('无法换算游戏窗口客户区坐标')
-    _post(user32, window.handle, WM_MOUSEMOVE, 0, _lparam(x, y))
+    _post(user32, window.handle, WM_MOUSEMOVE, 0, _lparam(x, y), on_dispatch)
     if action == 'move':
         return {'screen_x': screen.x, 'screen_y': screen.y}
     if action == 'wheel':
@@ -233,9 +277,37 @@ def send_mouse_message(window, action, x=None, y=None, button='left', delta=0, h
               _lparam(screen.x, screen.y))
         return {'screen_x': screen.x, 'screen_y': screen.y}
     down, up, flag = BUTTON_MESSAGES[button]
-    _post(user32, window.handle, down, flag, _lparam(x, y))
+    _post(user32, window.handle, down, flag, _lparam(x, y), on_dispatch)
     try:
         time.sleep(hold_ms / 1000)
     finally:
-        _post(user32, window.handle, up, 0, _lparam(x, y))
+        _post(user32, window.handle, up, 0, _lparam(x, y), on_dispatch)
     return {'screen_x': screen.x, 'screen_y': screen.y}
+
+
+def drag_message(window, x, y, end_x, end_y, button='left', duration_ms=500, steps=20,
+                 on_dispatch=None):
+    """一次完整拖动；每个移动消息带按住标记，异常时仍尝试释放。"""
+    if not (type(steps) is int and 2 <= steps <= 60 and type(duration_ms) is int and 50 <= duration_ms <= 3000):
+        raise ValueError('拖动须为 2～60 步、50～3000 毫秒')
+    if button not in BUTTON_MESSAGES or any(not (0 <= a < window.width and 0 <= b < window.height)
+                                           for a, b in ((x, y), (end_x, end_y))):
+        raise ValueError('拖动按钮或客户区坐标无效')
+    user32, _ = _windows()
+    down, up, flag = BUTTON_MESSAGES[button]
+    _post(user32, window.handle, WM_MOUSEMOVE, 0, _lparam(x, y), on_dispatch)
+    release_x, release_y = x, y
+    _post(user32, window.handle, down, flag, _lparam(x, y), on_dispatch)
+    try:
+        started = time.monotonic()
+        for index in range(1, steps + 1):
+            # Windows 短时 sleep 可能向上取整；按绝对期限追赶，避免逐步累计误差。
+            delay = started + duration_ms * index / steps / 1000 - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            release_x = round(x + (end_x - x) * index / steps)
+            release_y = round(y + (end_y - y) * index / steps)
+            _post(user32, window.handle, WM_MOUSEMOVE, flag, _lparam(release_x, release_y), on_dispatch)
+    finally:
+        _post(user32, window.handle, up, 0, _lparam(release_x, release_y), on_dispatch)
+    return {'client_x': end_x, 'client_y': end_y}

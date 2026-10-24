@@ -13,6 +13,62 @@ def number(value, label, minimum=0, positive=False):
     return value
 
 
+def geometry(data):
+    return {'width': data['width'], 'height': data['height'],
+            'origin': {'mode': data['origin'], 'x': data['sequence']['xorigin'], 'y': data['sequence']['yorigin']},
+            'bbox': {'mode': data['bboxMode'], 'left': data['bbox_left'], 'right': data['bbox_right'],
+                     'top': data['bbox_top'], 'bottom': data['bbox_bottom']}}
+
+
+def automatic_bounds(data, bounds):
+    if bounds is None:
+        raise ValueError('自动碰撞框没有超过透明度阈值的像素，拒绝猜测空碰撞框')
+    data.update(bbox_left=bounds[0], bbox_top=bounds[1], bbox_right=bounds[2]-1, bbox_bottom=bounds[3]-1)
+
+
+def resize_geometry(data, width, height, origin_policy, bbox_policy, alpha_bounds=None):
+    """只调整尺寸、原点和碰撞框；帧/时间轴/图层身份保持原样。"""
+    if data.get('nineSlice') or data.get('ConfigValues'):
+        raise ValueError('尺寸变化暂不支持九宫格或配置覆盖精灵')
+    try:
+        before = geometry(data)
+        box = before['bbox']
+        if (type(box['mode']) is not int or box['mode'] not in (0, 1, 2)
+                or any(type(box[k]) is not int for k in ('left', 'right', 'top', 'bottom'))
+                or not 0 <= box['left'] <= box['right'] < before['width']
+                or not 0 <= box['top'] <= box['bottom'] < before['height']):
+            raise ValueError('原碰撞框无效，拒绝调整尺寸')
+        if type(data['origin']) is not int or not 0 <= data['origin'] <= 9:
+            raise ValueError('原点模式不受支持')
+        if origin_policy == 'scale':
+            data['sequence']['xorigin'] = round(before['origin']['x'] * width / before['width'])
+            data['sequence']['yorigin'] = round(before['origin']['y'] * height / before['height'])
+        for field in ('xorigin', 'yorigin'):
+            if not -(2**31) <= data['sequence'][field] < 2**31:
+                raise ValueError('调整后的原点超出 32 位整数范围')
+        # 固定明确的像素原点，避免 IDE 按旧的预设模式再次改变它。
+        data['origin'] = 9
+        if bbox_policy == 'scale':
+            data['bboxMode'] = 2
+            data['bbox_left'] = math.floor(box['left'] * width / before['width'])
+            data['bbox_right'] = math.ceil((box['right'] + 1) * width / before['width']) - 1
+            data['bbox_top'] = math.floor(box['top'] * height / before['height'])
+            data['bbox_bottom'] = math.ceil((box['bottom'] + 1) * height / before['height']) - 1
+        elif bbox_policy == 'full_image' or box['mode'] == 1:
+            if bbox_policy == 'full_image':
+                data['bboxMode'] = 1
+            data.update(bbox_left=0, bbox_top=0, bbox_right=width-1, bbox_bottom=height-1)
+        elif box['mode'] == 0:
+            automatic_bounds(data, alpha_bounds)
+        elif box['right'] >= width or box['bottom'] >= height:
+            raise ValueError('保留的手动碰撞框超出新尺寸；请选择 bbox_policy=scale 或 full_image')
+        data['width'], data['height'] = width, height
+        return {'before': before, 'after': geometry(data),
+                'origin_policy': origin_policy, 'bbox_policy': bbox_policy}
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError('精灵尺寸或碰撞框结构不完整，拒绝修改') from exc
+
+
 def timeline(data, path):
     """返回序列、帧轨道、按时间排列的关键帧及图像帧；拒绝隐式修复。"""
     try:

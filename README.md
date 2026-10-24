@@ -12,7 +12,9 @@ MORX GMS2 MCP 是一个本地 stdio MCP 服务。AI 客户端可以读取项目�
 
 *Local stdio MCP server for GameMaker project authoring, isolated runs, and runtime inspection.*
 
-当前提供 51 个工具；服务使用本地 stdio，默认只读，运行能力默认关闭，MIT 许可。
+当前提供 58 个工具；服务使用本地 stdio，默认只读，运行能力默认关闭，MIT 许可。
+
+本文对应 `0.6.0`。使用本页全部功能请[从源码安装](#1-安装)；PyPI 安装包版本见上方徽章。
 
 [快速开始](#快速开始) · [能做什么](#能做什么) · [连接客户端](#连接客户端) · [使用示例](#使用示例) · [运行与观察](#运行与观察) · [工具清单](#工具清单) · [English](#english-quick-start)
 
@@ -22,12 +24,12 @@ MORX GMS2 MCP 是一个本地 stdio MCP 服务。AI 客户端可以读取项目�
 | --- | --- |
 | 脚本与物体 | 创建脚本、物体和常用事件（含碰撞、键盘、鼠标），配置精灵引用、父物体及常驻状态 |
 | 房间与实例 | 创建房间和实例图层，放置物体，设置启动房间 |
-| 美术与音频 | 导入多帧 PNG、WAV/OGG 声音、TTF/OTF/TTC 字体数据，创建 GLSL ES 着色器 |
-| 精灵动画 | 查询已有位图精灵，调整速度、原点、帧顺序和逐帧时长 |
+| 美术与音频 | 导入 PNG、WAV/OGG 和字体数据，创建着色器；查询和配置声音的压缩、流式、质量及音频组 |
+| 精灵动画 | 查询已有位图精灵，调整速度、原点、帧顺序和逐帧时长；按双哈希替换 PNG，可显式调整尺寸 |
 | 显示设置 | Windows 启动选项，以及独立的房间、相机和视口配置 |
 | GML 与运行 | 读取及哈希保护修改 GML；安装测试桥接；隔离 Windows VM 构建运行 |
 | 运行观察与控制 | 游戏截图、实例与全局变量读写、实例生成/销毁、运行日志、运行时异常、数据事件触发、窗口消息鼠标、批量动作序列 |
-| 项目结构 | 创建多级中文分组，移动虚拟分组，删除未引用资源，重命名并更新引用，校验资源引用 |
+| 项目结构 | 创建多级中文分组，移动虚拟分组，清理空分组，删除未引用资源，重命名并更新引用，校验资源引用 |
 | 修改与恢复 | 默认预览、固定项目绑定、冲突检测、事务备份与撤销 |
 
 ## 开发工作流
@@ -214,6 +216,48 @@ install_runtime_bridge → run_game → runtime_status → capture_game / inspec
 8. `run_game_sequence` 可把 wait、input、state、set、spawn、destroy、capture、event 组合成最多 32 步的序列，减少往返并一次返回多张截图。
 9. `stop_game` 结束会话并清理构建副本和存档目录；再次运行前必须先停止并读取旧日志。
 
+### 只编译、保留存档重启与截图导出
+
+`compile_game` 只调用 Igor 的 Windows VM Compile，不启动游戏，也不要求测试桥接；仍需启用 `--allow-run` 和配置 Runtime。返回会话后查询 `runtime_status`：`build_status=succeeded` 和退出码 0 才表示编译成功，不能凭日志中的完成标记判断。`compile_error_count` 是已识别诊断行的数量，无法识别的失败仍会由退出码标记为 failed；它与桥接的 `error_count` 分开。结束后用 `stop_game` 清理副本。
+
+`restart_game` 先结束本次受管进程，再用同一隔离副本重新 Igor Run，保留该会话存档。它会重新编译副本，不复制源项目最新改动，也不接管外部 Runner；返回后重新等待桥接就绪。最终 `stop_game` 仍会清理副本和存档。
+
+`save_game_capture` 将与内嵌截图相同的预览 PNG 保存到绑定项目 `.codex/morx-captures/<filename>.png`。它需要 `--write` 和 `dry_run=false`，只接受安全文件名，不覆盖已有文件，不开放任意写入目录。
+
+### 鼠标坐标与拖放
+
+`send_game_mouse` 默认 `coordinate_space='client'`，对应服务的 Win32 客户区读数。可选择 `physical`（独立查询的物理客户区）、`window`（游戏引擎窗口）或 `gui`；工具按所选尺寸转换为输入客户区坐标，并返回各轴缩放系数。无法取得所选尺寸时拒绝输入，不假定机器固定为某个 DPI。
+
+GUI 模式按整个客户区比例换算；项目若自行设置 GUI 偏移、留黑边或非全幅输出，须使用明确的 client 坐标。截图预览缩放与输入坐标是不同概念。
+
+`action='drag'` 需要起点 `x/y` 和终点 `end_x/end_y`，支持 50～3000 毫秒、2～60 步，只使用窗口消息；按住期间的移动消息携带按钮标记，结束或异常时释放按钮。移动按单调时钟安排，系统调度仍可能延长实际耗时。click/drag 默认先移动并等待 2 帧，可用 `settle_frames` 调整到 0～30。
+
+消息模式的 click/drag 返回 `mouse_trace`，按 `trace_id` 关联本次消息投递顺序和游戏 BeginStep 的逐帧记录，包含按下、释放时的窗口/GUI 坐标及按钮状态。最多保留 128 帧，截断时保留首帧、最近帧和独立的按下/释放样本；记录在操作结束或 10 秒后停止。`dispatch_complete` 只表示消息投递完成，`game_effect='unknown'` 表示工具不判断项目逻辑是否成功。
+
+`observed_mouse` 是操作后的较晚采样，可能已回到其他位置；核对释放位置应看本次记录的 `engine.release`。引擎未采到释放时该字段为空，不能用最近按下位置替代。BeginStep 记录也不能证明项目 GUI 事件执行成功；仍需检查实际游戏状态，不要自动重复输入。消息投递途中出错会保留已投递记录和错误，按钮仍会尝试释放。
+
+### 心跳与迟到回执
+
+`runtime_status.bridge_diagnostics` 返回就绪原因、最近心跳年龄及是否使用缓存。心跳文件短暂不可读时会重试，缓存也遵守 10 秒有效期。待确认请求返回年龄；如果完整回执留在临时文件，会按会话和请求 ID 识别为完成，不重发命令。响应不完整或身份不符时继续保留待确认状态。
+
+`bridge_io` 区分文件重试与实际命令结果：
+
+| 字段 | 含义 |
+| --- | --- |
+| `retry_attempts` | 本次游戏进程中，文件提升未成功的累计尝试数；旧字段 `write_failures` 是其兼容别名 |
+| `retry_recoveries` | 曾需要重试、后来成功提升的写入周期数，不是命令数量 |
+| `pending_writes` | 当前尚未提升的文件数量 |
+| `stalled_writes` | 持续等待至少 10 秒的文件数量；诊断阈值不代表命令已失败 |
+| `files` | 固定桥接文件各自的计数、等待时长、最近失败/恢复帧和请求 ID |
+
+`state` 为 `healthy`、`retrying`、`stalled` 或 `recovered`。已恢复后的累计重试数不会清零；不能因它大于 0 就认定输入丢失或截图失败。以工具的 `ok`/错误结果和实际游戏状态判断。`response_source='completed_temporary_file'` 只说明使用了完整临时回执，并不表示截图失败或需要重新执行。
+
+`inspect_game` 返回请求处理时的采样；`runtime_status` 从心跳读取，带 `sample_age_seconds`；停止结果的 `current=false` 表示最近历史采样。未提供诊断或字段不合法时返回未知/不可用，不当作零错误。文件诊断只能说明写入阶段和恢复情况，不推断 Windows 占用的具体原因。
+
+### 升级后的桥接同步
+
+先查询 `server_info.runtime_bridge`。`compatible=false` 时，预览并显式执行 `install_runtime_bridge` 同步项目桥接，再预览运行；服务不会自动修改项目中的桥接。该提示发生在启动 Runner 之前，不是编译失败。`compile_game` 不要求安装或同步桥接。
+
 **隔离与边界**
 
 | 项目 | 行为 |
@@ -229,10 +273,10 @@ install_runtime_bridge → run_game → runtime_status → capture_game / inspec
 **限制**
 
 - 仅支持 Windows VM 目标；不控制 IDE 图形界面，不提供原生断点、暂停/逐行调试或任意表达式求值。
-- 变量只按名称读写，不求值表达式；最多 16 个变量、100 个实例。读取字符串截断为 1024 字符；数组和结构体按深度 3、每个变量 64 个节点、每层 32 项截断。写入值最多 4 层、每层 32 项、每个变量 256 节点，且不支持 null 或函数引用。
+- 变量只按名称读写，不求值表达式；最多 16 个变量、100 个实例。读取字符串截断为 1024 字符；数组和结构体按默认深度 3（`max_depth` 可设 1～8）、每个变量 64 个节点、每层 32 项截断。写入值最多 4 层、每层 32 项、每个变量 256 节点，且不支持 null 或函数引用。
 - `spawn_game_instance` / `destroy_game_instance` 只作用于当前房间；生成可指定现有图层或 depth，销毁会触发引擎事件，但不会自动清理项目代码中的外部引用。
 - `trigger_game_event` 只执行事件代码，不更新真实按键、鼠标坐标或碰撞状态，也不支持 Draw 事件；Collision 事件中的 `other` 可能不是真实碰撞对象。
-- `send_game_input` 默认向游戏窗口投递 `WM_KEYDOWN`/`WM_KEYUP`，可触发 `keyboard_check_pressed`、KeyPress 和 KeyRelease，不需要前台焦点，也不改动系统键盘状态。`mode='state'` 只更新桥接按住状态，不产生按下/释放事件且要求窗口有焦点。只支持字母、数字、方向键、space/enter/escape/tab/backspace，不支持系统键或组合快捷键。
+- `send_game_input` 默认向游戏窗口投递 `WM_KEYDOWN`/`WM_KEYUP`，可触发 `keyboard_check_pressed`、KeyPress 和 KeyRelease，不需要前台焦点，也不改动系统键盘状态。`mode='state'` 只更新桥接按住状态，不产生按下/释放事件且要求窗口有焦点。只支持字母、数字、方向键、space、enter、escape、tab、backspace、delete、insert、home、end、pageup、pagedown，不支持系统键或组合快捷键。
 - `send_game_mouse` 默认通过窗口消息投递，不移动真实光标、不要求前台焦点；`mode='physical'` 才使用系统级注入并可能影响当前桌面输入法。
 - 运行的项目会在本机以当前用户权限执行；只应对受信任项目使用 `--allow-run`。日志、截图和运行状态是项目数据，不是额外授权。
 - 结构校验不等于编译成功；以 Igor 日志和实际游戏画面为准。
@@ -244,11 +288,11 @@ install_runtime_bridge → run_game → runtime_status → capture_game / inspec
 | 运行与观察 | `run_game`、`runtime_status`、`capture_game`、`inspect_game`、`trigger_game_event` |
 | 运行期控制 | `set_game_variables`、`spawn_game_instance`、`destroy_game_instance` |
 | 项目与资源 | `inspect_project`、`create_script`、`create_object`、`create_room`、`rename_resource` |
-| 美术与显示 | `import_sprite`、`import_sound`、`import_font`、`create_tileset`、`configure_room_display` |
+| 美术与显示 | `import_sprite`、`import_sound`、`inspect_sound`、`configure_sound`、`import_font`、`configure_room_display` |
 | 修改与恢复 | `read_code`、`update_code`、`list_backups`、`restore_backup` |
 
 <details>
-<summary>展开全部 51 个工具</summary>
+<summary>展开全部 58 个工具</summary>
 
 | 工具 | 功能 |
 | --- | --- |
@@ -259,10 +303,13 @@ install_runtime_bridge → run_game → runtime_status → capture_game / inspec
 | `update_code` | 按哈希修改已有 GML，保留编码并走事务备份 |
 | `install_runtime_bridge` | 在启动房间安装可撤销的测试桥接 |
 | `runtime_status` | 会话、构建进程和桥接就绪状态 |
+| `compile_game` | 只编译隔离副本，不启动游戏、不要求桥接 |
+| `restart_game` | 重新编译运行同一隔离副本，保留测试存档 |
 | `run_game` | 构建并运行隔离 Windows VM 副本，需 `--allow-run` |
 | `stop_game` | 停止本服务创建的会话并清理副本/存档 |
 | `get_runtime_output` | 按游标读取构建和运行日志 |
 | `get_runtime_errors` | 读取未处理异常和桥接命令错误 |
+| `save_game_capture` | 导出预览 PNG 到项目固定目录，不覆盖已有文件 |
 | `capture_game` | 从游戏 DrawGUIEnd 获取 PNG 画面 |
 | `inspect_game` | 读取房间、窗口、GUI、实例变量或全局变量；数组和结构体受深度与数量限制 |
 | `set_game_variables` | 按名称写入实例或全局变量，返回旧值；可限制目标实例数 |
@@ -270,12 +317,13 @@ install_runtime_bridge → run_game → runtime_status → capture_game / inspec
 | `destroy_game_instance` | 按实例 ID 或物体名销毁最多 limit 个实例 |
 | `send_game_input` | 默认用窗口消息按住按键并释放，可产生 KeyPress；`state` 模式只改按住状态 |
 | `trigger_game_event` | 通过桥接数据执行事件代码，不需要物理键鼠 |
-| `send_game_mouse` | 默认用窗口消息发送 move/click/wheel，可选系统级注入 |
+| `send_game_mouse` | 默认用窗口消息发送 move/click/wheel/drag，明确坐标空间，可选系统级注入 |
 | `wait_game_frames` | 等待自然运行帧，不是暂停或单步 |
 | `run_game_sequence` | 组合 wait/input/state/set/spawn/destroy/capture/event 动作并批量返回结果 |
 | `inspect_display_settings` | Windows 选项及指定房间/首房间的尺寸、相机和视口 |
 | `configure_windows_display` | 显示名称、启动全屏、边框、大小调整许可等 Windows 选项 |
 | `configure_room_display` | 独立调整房间大小、一个相机及其视口 |
+| `remove_empty_group` | 项目哈希保护清理空分组及排序项，拒绝非空组 |
 | `ensure_group` | 创建多级虚拟分组 |
 | `create_script` | 创建脚本与初始 GML |
 | `create_object` | 创建物体 |
@@ -290,10 +338,13 @@ install_runtime_bridge → run_game → runtime_status → capture_game / inspec
 | `place_object` | 放入实例并登记创建顺序 |
 | `set_start_room` | 调整启动房间 |
 | `import_sprite` | 复制等尺寸 PNG 帧并创建可编辑精灵 |
+| `replace_sprite_images` | 双哈希保护替换同帧数、单图像图层 PNG；可显式调整尺寸、原点及碰撞框 |
 | `inspect_sprite` | 查询帧 ID、顺序、时长、速度、原点及描述文件哈希 |
 | `configure_sprite` | 修改已有位图精灵的速度、速度单位及自定义原点 |
 | `set_sprite_animation` | 重排现有帧、设置逐帧时长，不修改 PNG |
-| `import_sound` | 复制 WAV 或 OGG Vorbis 并创建声音 |
+| `import_sound` | 复制 WAV/OGG Vorbis 并创建声音，可指定压缩、流式、质量等导出设置 |
+| `inspect_sound` | 查询声音设置、描述和源音频哈希、已有音频组 |
+| `configure_sound` | 按描述哈希配置已有声音，默认预览并支持事务撤销 |
 | `import_font` | 将 TTF/TTE/OTF/TTC 作为 IncludedFile 导入 datafiles/fonts |
 | `create_shader` | 创建 GLSL ES 顶点/片段源文件 |
 | `create_tileset` | 从精灵创建瓦片集 |
@@ -306,11 +357,55 @@ install_runtime_bridge → run_game → runtime_status → capture_game / inspec
 
 </details>
 
+清理分组前调用 `inspect_project`，将 `project_sha256` 传给 `remove_empty_group.expected_sha256`。预览会列出直接资源、子组和排序引用；非空组执行时拒绝，不递归删除。
+
+替换精灵图像前调用 `inspect_sprite`，传入 `sha256` 和 `image_sha256`，将 PNG 按动画顺序交给 `replace_sprite_images`。默认要求同尺寸，所有新帧仍须等尺寸、数量不变、单图像图层；资源、帧/图层身份、分组和时间轴保留，外部改图后旧哈希失效。
+
+需要改变尺寸时，显式设置 `allow_resize=true`，先核对预览中的 `geometry.before/after`：
+
+| 参数 | 尺寸变化时的行为 |
+| --- | --- |
+| `origin_policy='keep'`（默认） | 保留原点像素坐标，允许位于图像外，切换为自定义原点 |
+| `origin_policy='scale'` | 按宽高比例调整原点并取最近整数，切换为自定义原点 |
+| `bbox_policy='keep'`（默认） | 保留碰撞框模式；整图框更新到新尺寸，自动框按全部新帧 Alpha 与原透明度阈值重算，手动框坐标保持且须落在新尺寸内 |
+| `bbox_policy='scale'` | 按比例调整旧框，切换为手动碰撞框 |
+| `bbox_policy='full_image'` | 使用新图整幅边界，切换为整图碰撞框 |
+
+尺寸变化拒绝九宫格和配置覆盖精灵。自动框在同尺寸替换时也会重新计算；全部帧都没有超过透明度阈值的像素时拒绝猜测空框。描述与所有帧 PNG 在同一事务内更新，失败回滚，撤销恢复原字节；不会先删除再重新注册资源。不增删帧或自动改写使用该精灵的 GML；尺寸和碰撞效果需要重新编译运行检查。
+
 默认分组：脚本、物体/object、物体/system（`sys_`）、物体/ui（`ui_`）、房间、精灵、声音、着色器、瓦片集；均可通过参数指定其他分组。
 
 事件支持 Create、Destroy、Step/BeginStep/EndStep、Draw/DrawGUI/DrawBegin/DrawEnd/DrawGUIBegin/DrawGUIEnd、CleanUp、RoomStart/RoomEnd，以及 Alarm 0～11、User 0～15。Alarm/User 通过 `event` 与 `number` 分别指定。
 
 PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最多 8192。声音最多 128 MiB：WAV 为单/双声道 8/16/24 位 PCM；OGG 为单/双声道 Vorbis，服务读取采样率、声道和时长。字体支持 TTF/TTE/OTF/TTC，最多 64 MiB，作为 `datafiles/fonts` 下的 IncludedFile 导入，不烘焙 GMFont 资源。原始导入文件不修改。`configure_object` 中 null 表示保留，sprite/parent 空字符串表示清空。
+
+### 声音设置
+
+新声音可在 `import_sound` 时指定设置；已有声音先 `inspect_sound`，再把描述文件的 `sha256` 传给 `configure_sound.expected_sha256`。默认只预览，执行需 `--write` 和 `dry_run=false`；null 保留原值，未知字段、源音频、资源身份和资源树分组不改。配置覆盖的声音可查询，暂不修改。
+
+| 参数 | 支持值 |
+| --- | --- |
+| `compression` | `uncompressed` 未压缩；`compressed` 压缩；`decompress_on_load` 加载时解压；`streamed` 从磁盘流式播放 |
+| `volume` / `preload` | 资源音量 0～1；布尔预加载标志 |
+| `compression_quality` | 0～10，导入默认 4；只影响需要转换的压缩导出 |
+| `conversion_mode` | `automatic`（默认）或 `required`；OGG automatic 可直接复制源文件，required 强制按目标设置转换 |
+| `sample_rate` / `channel_format` | 8000～192000 Hz；`mono`、`stereo`、`3d`，导入默认沿用源采样率/声道 |
+| `bit_depth` | 8 或 16，导入默认 16；只影响未压缩导出 |
+| `audio_group` | 项目已有音频组，导入默认 `audiogroup_default`；与资源树文件夹 `group` 不同 |
+
+流式模式只接受默认音频组。将已有非默认组声音改成流式时，必须同时显式指定 `audio_group='audiogroup_default'`，工具不会自动移组。`preload` 是保存到资源的标志，实际加载受平台、压缩模式和音频组控制：默认组的非流式声音通常随启动加载，自定义组仍须运行期 `audio_group_load`；它不保证整段流式音乐驻留内存。参见 [官方声音编辑器说明](https://manual.gamemaker.io/lts/en/The_Asset_Editors/Sounds.htm)和[音频组说明](https://manual.gamemaker.io/lts/en/Settings/Audio_Groups.htm)。
+
+例如，先查询背景音乐，再预览改为流式：
+
+```json
+{"name":"bgm_demo"}
+```
+
+```json
+{"name":"bgm_demo","expected_sha256":"<inspect_sound 返回的 sha256>","compression":"streamed","audio_group":"audiogroup_default","compression_quality":6,"conversion_mode":"required","preload":false,"dry_run":true}
+```
+
+修改只改变资源导出设置；源 WAV/OGG 不转码、不覆盖。保存后通过 `compile_game` 检查构建，再在新运行会话核对播放；已有运行副本不会随源资源修改而更新，`restart_game` 仍使用原快照。
 
 ### 编辑已有精灵动画
 
@@ -367,8 +462,8 @@ PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最
 | 显示配置 | 已有 `GMWindowsOptions v2`，以及非继承 `GMRoom v1` 的房间、相机和视口 |
 | 运行观察 | Windows x64 VM、已登录的本机 Runtime（Igor）、Windows 项目、单个活动会话 |
 | 已验证环境 | Windows，GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23，Windows VM 目标 |
+| 输入缩放 | 已实测 125% DPI 下多组窗口/GUI 尺寸；其他 DPI 尚未实测，自定义 GUI 偏移需显式使用 client 坐标 |
 
-运行链路已在上述环境完成真实验收：MCP 创建控制器和桥接，Igor 编译运行，桥接就绪，截图包含 DrawGUI，实例状态可读；瓦片集/瓦片图层、碰撞事件、KeyPress 数据事件、窗口消息鼠标和键盘、全局变量与数组/结构体读写、实例生成/销毁、OGG/WAV 声音与 TTF 字体导入、事件删除、批量序列和运行时异常捕获均通过，停止后副本与存档已清理。IDE 图形界面未参与该轮验收。
 
 其他 IDE 版本、平台及复杂项目建议先用副本验证。这是独立社区工具，与 GameMaker 官方无隶属关系。
 
@@ -387,7 +482,9 @@ PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最
 
 ## English quick start
 
-MORX GMS2 MCP is a local stdio server for AI-assisted GameMaker development. An assistant can inspect the project, create, rename and remove resources, edit code, build and run an isolated Windows copy, observe the game, and refine the result from runtime output. It exposes 51 tools with previews, backups and rollback.
+MORX GMS2 MCP is a local stdio server for AI-assisted GameMaker development. An assistant can inspect the project, create, rename and remove resources, edit code, build and run an isolated Windows copy, observe the game, and refine the result from runtime output. It exposes 58 tools with previews, backups and rollback.
+
+This README describes `0.6.0`. Install from source for all features documented here; the badge above shows the PyPI package version.
 
 Use an inspect → author → run and observe → adjust workflow. The AI client coordinates the work; this server handles project files, resources, GML and isolated runs. Runtime observation uses the server's own bridge inside the game, not desktop capture. IDE GUI control and native breakpoint/step debugging remain outside its scope.
 
@@ -405,9 +502,19 @@ Use `inspect_display_settings` before `configure_windows_display` or `configure_
 
 Runtime tools are disabled by default. Start the server with `--allow-run --runtime-root <runtime> --user-directory <logged-in user folder>` in addition to `--write` when GML edits are needed. `install_runtime_bridge` adds a managed persistent test object and room instance; preview it first. `run_game` builds a Windows VM copy under the user's local app data, then returns a session ID. Poll `runtime_status` until `bridge_ready` is true. Use `capture_game`, `inspect_game`, `get_runtime_output` and `get_runtime_errors` to observe. `inspect_game` reads instance variables by name; pass `scope='globals'` with a variable list to read globals, and expect bounded arrays and structs. `set_game_variables` writes instance or global variables and returns previous values; target instances by `object_name` or `instance_id`, and set `create_missing=true` only when a new variable is intended. `spawn_game_instance` and `destroy_game_instance` create or remove instances in the current room and trigger normal engine events. `trigger_game_event` executes event code from bridge data without physical input; `send_game_mouse` uses window messages by default and only moves the real cursor with `mode='physical'`. `send_game_input` posts `WM_KEYDOWN`/`WM_KEYUP` by default, so it can trigger press/release checks without changing the system keyboard state or requiring focus; `mode='state'` only updates held key state. Use `run_game_sequence` to batch wait/input/state/set/spawn/destroy/capture/event steps. `stop_game` ends the session and removes the build copy and save directory. Only one session is active; the maximum lifetime is 15 minutes. The game runs with your user privileges, so enable `--allow-run` only for trusted projects.
 
-The verified environment is Windows with GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23, targeting Windows VM. The run chain was verified end to end: bridge readiness, capture including DrawGUI content, live instance values, runtime variable writes, instance spawn/destroy, frame waits, tilesets and tile layers, collision events, data-driven KeyPress events, window-message mouse and keyboard input, global/array/struct inspection, OGG/WAV audio and TTF font import, event removal, batch sequences, runtime error capture, stop and cleanup. IDE GUI interaction was not part of that verification. Test a copy of your project when using other versions or platforms.
+The verified environment is Windows with GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23, targeting Windows VM. Mouse input was checked at 125% DPI with multiple window/GUI sizes. Other DPI settings and IDE/runtime versions should be checked on an isolated project before use.
 
-Existing GML and events are not overwritten by creation tools; use `read_code`/`update_code` for existing code. `delete_resource` requires that no other resource references the target. `rename_resource` updates resource references and collision event filenames, but names inside GML code are not rewritten. Do not save in the IDE while the server is writing. Multi-file transactions are not fully atomic. This server does not control the IDE, set breakpoints, pause/step the debugger or evaluate arbitrary expressions. `trigger_game_event` runs existing event code but does not update real key, mouse or collision state; Draw events are not supported by it. Mouse input uses window messages by default and only moves the real cursor in explicit physical mode. Font import adds TTF/OTF/TTC files as IncludedFiles under `datafiles/fonts`; it does not bake GMFont resources. Sprite frame creation/removal, image editing, MP3 import and display options for other platforms are outside its scope.
+Existing GML and events are not overwritten by creation tools; use `read_code`/`update_code` for existing code. `delete_resource` requires that no other resource references the target. `rename_resource` updates resource references and collision event filenames, but names inside GML code are not rewritten. Do not save in the IDE while the server is writing. Multi-file transactions are not fully atomic. This server does not control the IDE, set breakpoints, pause/step the debugger or evaluate arbitrary expressions. `trigger_game_event` runs existing event code but does not update real key, mouse or collision state; Draw events are not supported by it. Mouse input uses window messages by default and only moves the real cursor in explicit physical mode. Font import adds TTF/OTF/TTC files as IncludedFiles under `datafiles/fonts`; it does not bake GMFont resources. Sprite frame creation/removal, pixel painting, MP3 import and display options for other platforms are outside its scope.
+
+Additional tools: `compile_game` builds without launching Runner; check `runtime_status.build_status` and the exit code, then clean up with `stop_game`. `restart_game` rebuilds the same isolated snapshot while retaining its save data; final stop removes both. `save_game_capture` exports the preview to `.codex/morx-captures/` with write permission and no overwrite. `remove_empty_group` uses `inspect_project.project_sha256` and rejects nonempty groups.
+
+`inspect_sound` reports GMSound v2 settings and descriptor/source hashes. `configure_sound` requires the descriptor hash and supports volume, compression/streaming, a preload flag, quality, conversion policy, sample rate, channel format, bit depth and existing audio groups; `import_sound` accepts the same settings. Streamed sounds require the default audio group. Preload does not replace runtime group loading. OGG automatic conversion can copy the original file; use required to enforce target conversion. Source audio is preserved, configuration overrides are not edited, and settings take effect on a new build.
+
+`replace_sprite_images` preserves resource/frame/layer IDs, grouping and timing, with both descriptor and image hashes from `inspect_sprite`. Equal-count single-layer PNG frames are required. Size changes require `allow_resize=true`; origin keep/scale and bounding-box keep/scale/full_image policies are previewed and applied in one reversible transaction. Nine-slice and configuration overrides are rejected for resizing.
+
+Mouse `coordinate_space` can be client, physical, window or gui. GUI mapping assumes full-client proportional scaling; custom offsets require client coordinates. Message-only drag has bounded duration/steps and releases the button. Message click/drag returns a correlated `mouse_trace` with dispatch order and up to 128 BeginStep frame samples, including press/release coordinates and button state; tracing stops after the operation or 10 seconds. The later `observed_mouse` sample does not establish release coordinates or gameplay success. Check game state and never replay inputs automatically. `inspect_game.max_depth` accepts 1–8 with the same 64-node budget. Readiness diagnostics report heartbeat age and cached reads; complete temporary responses are correlated to the request without replaying it.
+
+Bridge I/O `retry_attempts` (legacy alias `write_failures`) counts unsuccessful promotion attempts, not final command failures. `retry_recoveries` counts recovered write episodes; `pending_writes` and `stalled_writes` distinguish current work from waits of at least 10 seconds. Per-file records identify recent retry/recovery frames and request IDs. Heartbeat samples include age; stop results are historical. A complete temporary response is correlated without replaying the command; inspect its actual success/error result. Check `server_info.runtime_bridge` after upgrades, then preview and explicitly apply `install_runtime_bridge` when incompatible. Compile-only does not require the bridge.
 
 Licensed under [MIT](LICENSE). Contributions and sanitized bug reports are welcome.
 

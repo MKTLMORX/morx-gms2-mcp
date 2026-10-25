@@ -8,6 +8,7 @@ import sys
 
 ROOT_FILES = {'README.md', 'LICENSE', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md',
               'pyproject.toml', 'MANIFEST.in', '.gitignore'}
+PUBLIC_DOCS = {'docs/setup.md', 'docs/reference.md', 'docs/assets/workflow.svg'}
 RULES = {
     'private_windows_path': re.compile(r'(?i)\b[a-z]:[\\/]+(?:users|documents and settings)[\\/]+[^\s"\'<>]+'),
     'private_unix_path': re.compile(r'/(?:Users|home)/[^\s/"\'<>]+/'),
@@ -25,7 +26,7 @@ def public_email(value):
 
 def allowed_path(name):
     path = PurePosixPath(name)
-    if name in ROOT_FILES:
+    if name in ROOT_FILES or name in PUBLIC_DOCS:
         return True
     if len(path.parts) == 2:
         return ((path.parts[0] in ('morx_gms2_mcp', 'tests', 'scripts') and path.suffix == '.py')

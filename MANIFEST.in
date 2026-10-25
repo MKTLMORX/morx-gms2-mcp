@@ -1,5 +1,7 @@
 include LICENSE README.md CHANGELOG.md CONTRIBUTING.md SECURITY.md
 include .gitignore
+include docs/setup.md docs/reference.md
+include docs/assets/workflow.svg
 recursive-include tests *.py
 recursive-include examples *.py *.json *.toml
 recursive-include scripts *.py

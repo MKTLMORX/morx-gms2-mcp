@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="280" viewBox="0 0 1120 280" role="img" aria-labelledby="title desc">
+  <title id="title">MORX GMS2 MCP development workflow</title>
+  <desc id="desc">Edit project resources and GML, run an isolated game and inspect screenshots and state, then refine the project and verify again. A workflow illustration, not a game screenshot.</desc>
+  <defs>
+    <linearGradient id="background" x2="1" y2="1">
+      <stop stop-color="#101c2c"/>
+      <stop offset="1" stop-color="#182738"/>
+    </linearGradient>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#b6c8da" opacity=".09"/>
+    </pattern>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="m1 1 4 3-4 3" fill="none" stroke="#7d96af" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="1120" height="280" rx="20" fill="url(#background)"/>
+  <rect width="1120" height="280" rx="20" fill="url(#grid)"/>
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <g fill="#172638" stroke="#35495f">
+      <rect x="32" y="32" width="320" height="160" rx="14"/>
+      <rect x="400" y="32" width="320" height="160" rx="14"/>
+      <rect x="768" y="32" width="320" height="160" rx="14"/>
+    </g>
+    <g font-size="13" font-weight="600" letter-spacing="2" fill="#9fb4c9">
+      <text x="56" y="64">01 / AUTHOR</text>
+      <text x="424" y="64">02 / OBSERVE</text>
+      <text x="792" y="64">03 / ITERATE</text>
+    </g>
+    <g fill="#edf5fc" font-size="26" font-weight="600">
+      <text x="56" y="108">Edit the project</text>
+      <text x="424" y="108">Run &amp; inspect</text>
+      <text x="792" y="108">Refine &amp; verify</text>
+    </g>
+    <g font-size="17" fill="#b6c8da">
+      <text x="56" y="147">GML · Resources · Scenes</text>
+      <text x="424" y="147">Screenshots · State · Logs</text>
+      <text x="792" y="147">Changes · Rebuild · Check</text>
+    </g>
+    <g stroke-width="3" stroke-linecap="round">
+      <path d="M56 170h40" stroke="#6ee7c0"/>
+      <path d="M424 170h40" stroke="#7cbcff"/>
+      <path d="M792 170h40" stroke="#b6a4ff"/>
+    </g>
+    <g fill="none" stroke="#7d96af" stroke-width="2" marker-end="url(#arrow)">
+      <path d="M360 112h30"/>
+      <path d="M728 112h30"/>
+      <path d="M928 204v20q0 16-16 16H208q-16 0-16-16v-20"/>
+    </g>
+    <rect x="441" y="226" width="238" height="28" rx="14" fill="#142234"/>
+    <text x="560" y="245" text-anchor="middle" fill="#a5bdd3" font-size="14" letter-spacing="1">FEEDBACK INTO THE NEXT BUILD</text>
+  </g>
+</svg>

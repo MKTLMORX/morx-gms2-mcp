@@ -13,7 +13,8 @@ def main():
     version = re.search(r'__version__\s*=\s*[\'"]([^\'"]+)',
                         (root / 'morx_gms2_mcp/__init__.py').read_text(encoding='utf-8')).group(1)
     files = [root / name for name in ('pyproject.toml', 'LICENSE', 'README.md', 'CHANGELOG.md',
-        'CONTRIBUTING.md', 'SECURITY.md', '.gitignore', 'MANIFEST.in')]
+        'CONTRIBUTING.md', 'SECURITY.md', '.gitignore', 'MANIFEST.in',
+        'docs/setup.md', 'docs/reference.md', 'docs/assets/workflow.svg')]
     for folder, pattern in [('morx_gms2_mcp', '*.py'), ('tests', '*.py'), ('examples', '*.py'),
                             ('examples', '*.json'), ('examples', '*.toml'), ('scripts', '*.py'),
                             ('.github/workflows', '*.yml')]:

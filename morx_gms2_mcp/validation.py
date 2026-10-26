@@ -3,6 +3,7 @@ from pathlib import PurePosixPath
 from .resources import KINDS, EVENT_STEMS, group_check, walk_layers
 from .animation import number
 from .display import WINDOWS_PATH, windows_settings, room_settings
+from . import tiles as tile_storage
 
 
 def validate(project):
@@ -119,13 +120,10 @@ def validate(project):
                             else:
                                 check_ref(layer.get('tilesetId'), 'GMTileSet', path)
                             tiles = layer.get('tiles') or {}
-                            map_width = tiles.get('SerialiseWidth')
-                            map_height = tiles.get('SerialiseHeight')
-                            values = tiles.get('TileSerialiseData')
-                            if type(map_width) is not int or type(map_height) is not int or \
-                                    map_width < 1 or map_height < 1 or \
-                                    not isinstance(values, list) or len(values) != map_width * map_height:
-                                errors.append('瓦片图层数据不完整：' + path)
+                            try:
+                                _, _, values = tile_storage.read(tiles)
+                            except ValueError as exc:
+                                errors.append(f'{path}: {exc}')
                             else:
                                 target = (layer.get('tilesetId') or {}).get('path')
                                 tileset = documents.get(target)
@@ -135,9 +133,9 @@ def validate(project):
                                         if type(value) is not int:
                                             errors.append('瓦片索引不是整数：' + path)
                                             break
-                                        if value == 0x80000000:
+                                        if tile_storage.empty(value):
                                             continue
-                                        if not 0 <= (value & 0x0FFFFFFF) <= count:
+                                        if not 0 <= (value & tile_storage.INDEX_MASK) <= count:
                                             errors.append('瓦片索引超出瓦片集：' + path)
                                             break
                     order = [i['name'] for i in data['instanceCreationOrder']]

@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from PIL import Image
 from . import audio
 from . import schemas
+from . import tiles as tile_storage
 from .storage import Storage, digest, encode, parse_yy
 from .animation import number, timeline, retime, geometry, resize_geometry, automatic_bounds
 from .display import WINDOWS_PATH, WINDOWS_FLAGS, VIEW_FIELDS, windows_settings, room_settings, check_expected
@@ -1097,6 +1098,17 @@ class Project(Storage):
                 for target in (f'sprites/{name}/{frame}.png', f'sprites/{name}/layers/{frame}/{layer}.png'):
                     edit.changes[target] = raw
             resized = size != (data['width'], data['height'])
+            if resized:
+                dependents = []
+                for entry in edit.load(self.yyp.name)['resources']:
+                    candidate = entry['id']
+                    if candidate['path'].startswith('tilesets/'):
+                        owner = edit.load(candidate['path'])
+                        sprite = owner.get('spriteId') or {}
+                        if sprite.get('path') == ref['path'] or sprite.get('name') == name:
+                            dependents.append(candidate['name'])
+                if dependents:
+                    raise ValueError('精灵被瓦片集引用，不能改变尺寸：' + ', '.join(dependents))
             dimensions = {'before': before_geometry, 'after': geometry(data)}
             if resized:
                 dimensions = resize_geometry(data, *size, origin_policy, bbox_policy, alpha_bounds)
@@ -1461,11 +1473,7 @@ class Project(Storage):
                 raise ValueError('须指定唯一的瓦片图层')
             target = layers[0]
             tiles = target.get('tiles') or {}
-            map_width, map_height = tiles.get('SerialiseWidth'), tiles.get('SerialiseHeight')
-            values = tiles.get('TileSerialiseData')
-            if type(map_width) is not int or type(map_height) is not int or \
-                    not isinstance(values, list) or len(values) != map_width * map_height:
-                raise ValueError('瓦片图层数据不完整')
+            map_width, map_height, values = tile_storage.read(tiles)
             width = map_width if width is None else width
             height = map_height if height is None else height
             integer(width, 'width', 1, 1024)
@@ -1477,16 +1485,16 @@ class Project(Storage):
             result = {'name': target['name'], 'tileset': target.get('tilesetId'),
                       'x': target.get('x', 0), 'y': target.get('y', 0),
                       'width': map_width, 'height': map_height, 'depth': target.get('depth', 0),
-                      'non_empty': sum(1 for value in values if value != schemas.EMPTY_TILE),
+                      'non_empty': sum(1 for value in values if not tile_storage.empty(value)),
                       'room_sha256': digest(self.path(ref['path']).read_bytes())}
             if include_cells:
                 cells = []
                 for row in range(y, y + height):
                     for column in range(x, x + width):
                         value = values[row * map_width + column]
-                        if value == schemas.EMPTY_TILE:
+                        if tile_storage.empty(value):
                             continue
-                        cells.append({'x': column, 'y': row, 'tile': value & 0x0FFFFFFF,
+                        cells.append({'x': column, 'y': row, 'tile': value & tile_storage.INDEX_MASK,
                                       'flip_x': bool(value & schemas.TILE_FLIP_H),
                                       'flip_y': bool(value & schemas.TILE_FLIP_V),
                                       'rotate': bool(value & schemas.TILE_ROTATE)})
@@ -1510,11 +1518,7 @@ class Project(Storage):
                 raise ValueError('须指定唯一的瓦片图层')
             target = layers[0]
             tiles = target.get('tiles') or {}
-            map_width, map_height = tiles.get('SerialiseWidth'), tiles.get('SerialiseHeight')
-            values = tiles.get('TileSerialiseData')
-            if type(map_width) is not int or type(map_height) is not int or \
-                    not isinstance(values, list) or len(values) != map_width * map_height:
-                raise ValueError('瓦片图层数据不完整')
+            map_width, map_height, values = tile_storage.read(tiles)
             tileset_ref = target.get('tilesetId') or {}
             if not isinstance(tileset_ref, dict) or not tileset_ref.get('name'):
                 raise ValueError('瓦片图层缺少瓦片集引用')
@@ -1550,6 +1554,7 @@ class Project(Storage):
                 if values[index] != value:
                     updated += 1
                 values[index] = value
+            tile_storage.write(tiles, values)
             edit.save(ref['path'], data)
             result = edit.commit(dry_run)
             result['updated'] = updated

@@ -599,6 +599,76 @@ class RuntimeTests(ProjectFixture):
             with self.assertRaises(ValueError):
                 self.runtime.inspect('session', **arguments)
 
+    def test_sequence_state_depth_reaches_bridge_request(self):
+        self.launch()
+        self.ready()
+        for depth in (1, 8):
+            with patch.object(self.runtime, 'request', return_value={'ok': True}) as request:
+                self.runtime.run_sequence(self.session_id, [
+                    {'action': 'state', 'scope': 'globals', 'variables': ['inventory'],
+                     'max_depth': depth}], dry_run=False)
+            self.assertEqual(request.call_args.args[1], 'state')
+            self.assertEqual(request.call_args.args[2]['max_depth'], depth)
+        for depth in (0, 9, True, 1.5):
+            with patch.object(self.runtime, 'request') as request:
+                with self.assertRaises(ValueError):
+                    self.runtime.run_sequence(self.session_id,
+                        [{'action': 'state', 'max_depth': depth}], dry_run=False)
+                request.assert_not_called()
+
+    def test_stop_reports_partial_cleanup_and_allows_retry(self):
+        import shutil
+        self.launch()
+        directory = self.runtime.session['directory']
+        savedir = self.runtime.session['save_directory']
+        remove = shutil.rmtree
+        def fail_save(path):
+            if Path(path) == savedir:
+                raise PermissionError('test lock')
+            return remove(path)
+        with patch('morx_gms2_mcp.runtime.shutil.rmtree', side_effect=fail_save):
+            result = self.runtime.stop(self.session_id, False)
+        self.assertFalse(result['cleaned'])
+        self.assertTrue(result['stopped'])
+        self.assertFalse(directory.exists())
+        self.assertTrue(savedir.exists())
+        self.assertEqual(result['cleanup'][1]['error_type'], 'PermissionError')
+        with self.assertRaisesRegex(ValueError, '再次 stop_game'):
+            self.runtime.run(compile_only=True)
+        result = self.runtime.stop(self.session_id, False)
+        self.assertTrue(result['cleaned'])
+        self.assertFalse(savedir.exists())
+        self.assertTrue(self.runtime.stop(self.session_id, False)['cleaned'])
+
+    def test_cleanup_confirms_absence_and_rejects_unsafe_path(self):
+        self.launch()
+        with patch('morx_gms2_mcp.runtime.shutil.rmtree', return_value=None):
+            result = self.runtime.stop(self.session_id, False)
+        self.assertFalse(result['cleaned'])
+        self.assertEqual([i['reason'] for i in result['cleanup']], ['directory_remains'] * 2)
+        foreign = self.root / 'foreign'
+        foreign.mkdir()
+        bad = {**self.runtime.session, 'directory': foreign}
+        result = self.runtime._cleanup(bad)
+        self.assertFalse(result['cleaned'])
+        self.assertEqual(result['cleanup'][0]['reason'], 'unsafe_path')
+        self.assertTrue(foreign.exists())
+
+    def test_compressed_map_passes_compile_preflight(self):
+        png = self.root / 'tile.png'
+        Image.new('RGBA', (16, 16), (1, 2, 3, 255)).save(png)
+        self.project.import_sprite('spr_tile', [str(png)])
+        self.project.create_tileset('ts_tile', 'spr_tile', 8, 8)
+        self.project.create_tile_layer('Room1', 'Tiles', 'ts_tile', width=2, height=2)
+        room = self.project.read('rooms/Room1/Room1.yy')
+        next(layer for layer in room['layers'] if layer['name'] == 'Tiles')['tiles'] = {
+            'SerialiseWidth': 2, 'SerialiseHeight': 2, 'TileDataFormat': 1,
+            'TileCompressedData': [-4, 1]}
+        self.project.path('rooms/Room1/Room1.yy').write_bytes(encode(room))
+        with patch('morx_gms2_mcp.runtime.subprocess.Popen') as launch:
+            self.assertTrue(self.runtime.run(compile_only=True)['dry_run'])
+            launch.assert_not_called()
+
     def test_sequence_state_supports_globals_and_instance_id(self):
         step = self.runtime._sequence_step({
             'action': 'state', 'scope': 'globals', 'variables': ['score']})

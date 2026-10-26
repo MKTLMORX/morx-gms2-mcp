@@ -438,26 +438,54 @@ class Runtime:
     def _cleanup(self, session):
         """删除本服务创建的构建副本和存档目录；只操作名称与本次会话匹配的路径。"""
         session_id = session.get('id')
-        for path, expected in ((session.get('directory'), session_id),
-                               (session.get('save_directory'), 'MORX_Run_' + str(session_id))):
+        results = []
+        for target, path, expected in (
+                ('project_copy', session.get('directory'), session_id),
+                ('save_directory', session.get('save_directory'), 'MORX_Run_' + str(session_id))):
+            item = {'target': target, 'cleaned': False}
+            results.append(item)
             if not path:
+                item['reason'] = 'missing_session_path'
                 continue
             path = Path(path)
             if path.name != expected or not link_free(path):
+                item['reason'] = 'unsafe_path'
                 continue
-            shutil.rmtree(path, ignore_errors=True)
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                item.update(cleaned=True, reason='already_absent')
+                continue
+            except OSError as exc:
+                item.update(reason='inspection_failed', error_type=type(exc).__name__)
+                continue
+            try:
+                shutil.rmtree(path)
+            except OSError as exc:
+                item.update(reason='delete_failed', error_type=type(exc).__name__)
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                item.update(cleaned=True, reason='removed')
+            except OSError as exc:
+                item.update(reason='inspection_failed', error_type=type(exc).__name__)
+            else:
+                item.setdefault('reason', 'directory_remains')
         work_root = session.get('directory')
-        if work_root:
+        if work_root and results[0]['cleaned']:
             try:
                 Path(work_root).parent.rmdir()
             except OSError:
                 pass
+        return {'cleaned': all(item['cleaned'] for item in results), 'cleanup': results}
 
     def run(self, dry_run=True, compile_only=False):
         with self.guard:
             root, user, igor, sandbox = self._configuration()
             if self.session and not self.session.get('stopped'):
                 raise ValueError('已有运行会话，请先 stop_game；即使进程已退出也先读取日志')
+            if self.session and self.session.get('cleanup_failed'):
+                raise ValueError('上次会话目录尚未清理，请再次 stop_game 后重试')
             key = None if compile_only else self._bridge()
             validation = self.project.validate()
             if not validation['ok']:
@@ -840,7 +868,7 @@ class Runtime:
         allowed = {'wait': {'action', 'frames'},
                    'input': {'action', 'keys', 'frames', 'mode'},
                    'capture': {'action'},
-                   'state': {'action', 'object_name', 'variables', 'limit', 'scope', 'instance_id'},
+                   'state': {'action', 'object_name', 'variables', 'limit', 'scope', 'instance_id', 'max_depth'},
                    'set': {'action', 'values', 'scope', 'object_name', 'instance_id',
                            'limit', 'create_missing'},
                    'spawn': {'action', 'object_name', 'x', 'y', 'layer_name', 'depth'},
@@ -1191,10 +1219,12 @@ class Runtime:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=3)
+        cleanup = {'cleaned': False, 'cleanup': []}
         if not _preserve:
-            self._cleanup(session)
+            cleanup = self._cleanup(session)
+            session['cleanup_failed'] = not cleanup['cleaned']
         return {'session_id': session_id, 'stopped': True,
-                'exit_code': process.poll() if process else None, 'cleaned': not _preserve,
+                'exit_code': process.poll() if process else None, **cleanup,
                 'error_count': len(errors), 'errors': errors, 'bridge_io': io_status}
 
     def restart(self, session_id, dry_run=True):

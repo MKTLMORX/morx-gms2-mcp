@@ -9,7 +9,7 @@
 *GameMaker tools for AI agents · Local stdio MCP*
 
 [![CI](https://github.com/MKTLMORX/morx-gms2-mcp/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/MKTLMORX/morx-gms2-mcp/actions/workflows/tests.yml)
-[![PyPI 0.6.0](https://img.shields.io/badge/PyPI-0.6.0-3775A9?style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/morx-gms2-mcp/)
+[![PyPI 0.6.2](https://img.shields.io/badge/PyPI-0.6.2-3775A9?style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/morx-gms2-mcp/)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/pyproject.toml)
 [![Windows](https://img.shields.io/badge/Platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)](#适用范围)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/LICENSE)

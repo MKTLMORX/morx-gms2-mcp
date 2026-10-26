@@ -93,6 +93,60 @@ class RuntimeFeedbackTests(core.ProjectFixture):
         self.process = self.fixture.process
         self.fixture.ready()
 
+    def test_runtime_log_preserves_utf8_across_read_boundaries(self):
+        for text in ('x' * 4095 + '中文日志\n末行', 'x' * 4093 + '🎮中文\r\n结束'):
+            process = fixtures.FakeProcess(text.encode('utf-8'))
+            self.runtime.process = process
+            self.runtime.lines.clear()
+            self.runtime._collect(process)
+            self.assertEqual([row['text'] for row in self.runtime.lines], text.splitlines())
+            self.assertTrue(process.stdout.closed)
+
+    def test_runtime_log_flushes_incomplete_utf8_at_eof(self):
+        process = fixtures.FakeProcess(b'valid\nlast\xe4\xb8')
+        self.runtime.process = process
+        self.runtime._collect(process)
+        self.assertEqual([row['text'] for row in self.runtime.lines], ['valid', 'last\ufffd'])
+        self.assertTrue(process.stdout.closed)
+
+    def test_runtime_log_keeps_filtering_after_split_utf8(self):
+        process = fixtures.FakeProcess(('x' * 4095 + '中 password=example\nnext').encode('utf-8'))
+        self.runtime.process = process
+        self.runtime._collect(process)
+        self.assertEqual([row['text'] for row in self.runtime.lines],
+                         ['[credential-related output omitted]', 'next'])
+
+    def test_runtime_log_eof_decode_respects_line_limit(self):
+        process = fixtures.FakeProcess(b'x' * 20000 + b'\xe4\xb8')
+        self.runtime.process = process
+        self.runtime._collect(process)
+        self.assertEqual(len(self.runtime.lines), 1)
+        self.assertEqual(len(self.runtime.lines[0]['text']), 16384)
+        self.assertTrue(self.runtime.lines[0]['text'].endswith('[line truncated]'))
+
+    def test_long_runtime_line_keeps_error_prefix_and_marks_truncation(self):
+        process = fixtures.FakeProcess(('ERROR: useful diagnostic ' + 'x' * 30000 + '\nnext').encode())
+        self.runtime.process = process
+        self.runtime._collect(process)
+        line = self.runtime.lines[0]['text']
+        self.assertTrue(line.startswith('ERROR: useful diagnostic'))
+        self.assertIn('[line truncated]', line)
+        self.assertLessEqual(len(line), 16384)
+        self.assertTrue(self.runtime.build_diagnostics)
+        self.assertEqual(self.runtime.lines[1]['text'], 'next')
+
+    def test_long_runtime_line_preserves_credential_filter(self):
+        samples = ['password=example ' + 'x' * 30000,
+                   'x' * 30000 + ' password=example',
+                   'x' * 4093 + 'password=example ' + 'x' * 30000]
+        for text in samples:
+            process = fixtures.FakeProcess((text + '\nnext').encode())
+            self.runtime.process = process
+            self.runtime.lines.clear()
+            self.runtime._collect(process)
+            self.assertEqual([row['text'] for row in self.runtime.lines],
+                             ['[credential-related output omitted]', 'next'])
+
     def test_root_resource_parent_is_remapped_only_in_snapshot(self):
         path = self.root / 'rooms/Room1/Room1.yy'
         room = self.project.read('rooms/Room1/Room1.yy')

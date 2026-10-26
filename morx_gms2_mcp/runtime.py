@@ -1,6 +1,7 @@
 """固定项目的隔离构建、受管理进程与游戏内文件桥接。无桌面抓取或外部监听。"""
 from collections import deque
 from dataclasses import dataclass
+import codecs
 import io
 import json
 import math
@@ -18,6 +19,9 @@ from PIL import Image
 from .display import integer
 from .resources import name_check, trigger_spec, replace_refs
 from .storage import compact_encode, encode, parse_yy, replace_retry
+
+CREDENTIAL_OUTPUT = re.compile(
+    r'(?i)licen[cs]e|access.?key|api.?key|secret|token|password|authorization|authentication')
 
 
 @dataclass(frozen=True)
@@ -546,24 +550,38 @@ class Runtime:
                 'next': '查询 runtime_status；compile_only 以退出码 0 确认编译成功，运行以 bridge_ready 确认就绪'}
 
     def _collect(self, process):
-        buffer = ''
+        buffer, tail = '', ''
+        truncated = sensitive = False
+        decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
         try:
             while True:
                 chunk = process.stdout.read1(4096)
+                parts = decoder.decode(chunk, final=not chunk).split('\n')
+                for index, part in enumerate(parts):
+                    # 即使正文已截断，仍检查后续片段；尾部覆盖跨块的过滤标记。
+                    sensitive = sensitive or bool(CREDENTIAL_OUTPUT.search(tail + part))
+                    tail = (tail + part)[-32:]
+                    remaining = 16384 - len(buffer)
+                    buffer += part[:remaining]
+                    truncated = truncated or len(part) > remaining
+                    if index < len(parts) - 1 or (not chunk and (buffer or truncated)):
+                        if sensitive:
+                            line = '[credential-related output omitted]'
+                        elif truncated:
+                            marker = ' [line truncated]'
+                            line = buffer[:16384 - len(marker)] + marker
+                        else:
+                            line = buffer
+                        self._log(line, process)
+                        buffer, tail = '', ''
+                        truncated = sensitive = False
                 if not chunk:
                     break
-                buffer += chunk.decode('utf-8', errors='replace')
-                rows = buffer.split('\n')
-                buffer = rows.pop()[-16384:]
-                for row in rows:
-                    self._log(row[:16384], process)
-            if buffer:
-                self._log(buffer, process)
         finally:
             process.stdout.close()
 
     def _log(self, line, process=None):
-        if re.search(r'(?i)licen[cs]e|access.?key|api.?key|secret|token|password|authorization|authentication', line):
+        if CREDENTIAL_OUTPUT.search(line):
             line = '[credential-related output omitted]'
         else:
             line = self._redact(line)

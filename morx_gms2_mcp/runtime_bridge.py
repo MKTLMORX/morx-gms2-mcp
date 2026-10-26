@@ -178,6 +178,11 @@ mcp_value = function(_value,_depth,_budget) {
     _budget.left -= 1;
     if (is_undefined(_value)) return {type:"undefined"};
     if (is_bool(_value)) return _value;
+    if (is_int64(_value)) {
+        if (_value > int64(9007199254740991) || _value < int64(-9007199254740991))
+            return {type:"int64",value:string(_value)};
+        return real(_value);
+    }
     if (is_real(_value)) {
         if (is_nan(_value) || is_infinity(_value)) return {type:"non_finite"};
         return _value;

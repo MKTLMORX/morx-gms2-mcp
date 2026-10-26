@@ -175,6 +175,7 @@ GUI 模式按整个客户区比例换算；项目若自行设置 GUI 偏移、�
 - 仅支持 Windows VM 目标；不控制 IDE 图形界面，不提供原生断点、暂停/逐行调试或任意表达式求值。
 - 变量只按名称读写，不求值表达式；最多 16 个变量、100 个实例。读取字符串截断为 1024 字符；数组和结构体按默认深度 3（`max_depth` 可设 1～8）、每个变量 64 个节点、每层 32 项截断。写入值最多 4 层、每层 32 项、每个变量 256 节点，且不支持 null 或函数引用。
 - `run_game_sequence` 的 `state` 步骤也支持 `max_depth=1～8`，与单次 `inspect_game` 一致。
+- 枚举及 64 位整数可正常读取。超出 ±9007199254740991 的整数以 `{"type":"int64","value":"十进制整数"}` 返回，避免客户端数值舍入；该结构是读取结果，不是写入指令。
 - `spawn_game_instance` / `destroy_game_instance` 只作用于当前房间；生成可指定现有图层或 depth，销毁会触发引擎事件，但不会自动清理项目代码中的外部引用。
 - `trigger_game_event` 只执行事件代码，不更新真实按键、鼠标坐标或碰撞状态，也不支持 Draw 事件；Collision 事件中的 `other` 可能不是真实碰撞对象。
 - `send_game_input` 默认向游戏窗口投递 `WM_KEYDOWN`/`WM_KEYUP`，可触发 `keyboard_check_pressed`、KeyPress 和 KeyRelease，不需要前台焦点，也不改动系统键盘状态。`mode='state'` 只更新桥接按住状态，不产生按下/释放事件且要求窗口有焦点。只支持字母、数字、方向键、space、enter、escape、tab、backspace、delete、insert、home、end、pageup、pagedown，不支持系统键或组合快捷键。

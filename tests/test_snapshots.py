@@ -33,7 +33,8 @@ class SnapshotTests(ProjectFixture):
         real_walk = snapshots.os.walk
         visits = []
         def walk(path, **kwargs):
-            visits.append(Path(path).relative_to(self.root).as_posix())
+            # Windows 临时目录可能使用 8.3 短名；与 Project 使用同一规范路径。
+            visits.append(Path(path).relative_to(self.project.root).as_posix())
             return real_walk(path, **kwargs)
         with patch('morx_gms2_mcp.snapshots.os.walk', side_effect=walk):
             result = snapshots.plan(self.project)

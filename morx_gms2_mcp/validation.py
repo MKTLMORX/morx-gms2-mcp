@@ -4,12 +4,14 @@ from .resources import KINDS, EVENT_STEMS, group_check, walk_layers
 from .animation import number
 from .display import WINDOWS_PATH, windows_settings, room_settings
 from . import tiles as tile_storage
+from .textures import groups as texture_groups
 
 
 def validate(project):
     errors, warnings, assets, documents = [], [], [], {}
     try:
         meta = project.metadata()
+        texture_names = {g['name'] for g in texture_groups(meta)}
         if project.path(WINDOWS_PATH).is_file():
             try:
                 windows_settings(project.read(WINDOWS_PATH))
@@ -72,6 +74,10 @@ def validate(project):
             try:
                 name, kind = data['name'], data['resourceType']
                 base = path.rsplit('/', 1)[0]
+                group = data.get('textureGroupId')
+                if group is not None and (not isinstance(group, dict) or group.get('name') not in texture_names
+                        or group.get('path') != 'texturegroups/' + group['name']):
+                    errors.append('纹理组引用错误：' + path)
                 if kind == 'GMScript':
                     require_file(base + '/' + name + '.gml')
                 elif kind == 'GMObject':
@@ -169,9 +175,6 @@ def validate(project):
                                 for channel in key['Channels'].values():
                                     if channel['Id']['name'] not in frames or channel['Id']['path'] != path:
                                         errors.append('精灵动画帧引用错误：' + path)
-                    group = data.get('textureGroupId')
-                    if group and group['name'] not in {g['name'] for g in meta.get('TextureGroups', [])}:
-                        errors.append('纹理组引用错误：' + path)
                 elif kind == 'GMTileSet':
                     sprite_ref = data.get('spriteId')
                     check_ref(sprite_ref, 'GMSprite', path)
@@ -188,9 +191,6 @@ def validate(project):
                                 errors.append('精灵尺寸与瓦片尺寸不整除：' + path)
                             elif data.get('tile_count') != (width // tile_width) * (height // tile_height):
                                 errors.append('瓦片数量与精灵尺寸不一致：' + path)
-                    group = data.get('textureGroupId')
-                    if group and group['name'] not in {g['name'] for g in meta.get('TextureGroups', [])}:
-                        errors.append('纹理组引用错误：' + path)
                 elif kind == 'GMSound':
                     require_file(base + '/' + data['soundFile'])
                     if data['audioGroupId']['name'] not in {g['name'] for g in meta.get('AudioGroups', [])}:

@@ -22,13 +22,13 @@
 
 ## 功能
 
-58 个工具，覆盖项目制作与运行检查。支持 Codex、Claude Code 等本地 MCP 客户端。
+71 个工具，覆盖项目制作与运行检查。支持 Codex、Claude Code 等本地 MCP 客户端。
 
 | 领域 | 支持的操作 |
 | --- | --- |
-| **运行与检查** | 编译运行独立副本，查看截图和日志，读写变量，模拟键鼠交互 |
-| **代码与场景** | 读写 GML，创建脚本、物体、事件、房间、实例和瓦片图层 |
-| **美术与音频** | 导入 PNG、WAV/OGG、字体；编辑精灵；配置声音压缩、流式播放和音频组 |
+| **运行与检查** | 按依赖生成副本，多客户端隔离运行、键鼠测试、状态断言和证据保存 |
+| **代码与场景** | 读写 GML，创建脚本、物体、网络异步事件、房间、实例和瓦片图层 |
+| **美术与音频** | 编辑精灵和纹理组，配置缩小采样；导入音频与字体，设置声音压缩和流式播放 |
 | **显示与资源** | 配置窗口、相机和视口；整理分组、重命名及删除资源 |
 | **修改与恢复** | 预览变更、检测冲突、保存备份并撤销 |
 
@@ -83,6 +83,8 @@ $gameProject = 'D:\Games\MyGame'
 3. 用 `capture_game` 查看画面、`inspect_game` 检查状态，结合输入和日志复现问题。
 4. 用 `stop_game` 清理会话；修改源项目后重新 `run_game` 验证。
 
+大型项目可先用 `inspect_runtime_snapshot` 查看复制范围和预计大小；联调多个客户端时用 `run_game(new_session=true)` 显式新建会话。
+
 仅检查编译可用 `compile_game`，无需桥接。`restart_game` 保留测试存档，但使用同一项目快照。完整流程见[运行与观察](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/reference.md#运行与观察)。
 
 ## 使用示例
@@ -95,6 +97,8 @@ $gameProject = 'D:\Games\MyGame'
 
 > **验证效果** — 运行游戏，点击开始按钮后截图，读取玩家的 hp 和全局 score；发现问题后修改代码，重新运行验证，最后清理会话。
 
+可复跑的检查使用 `run_game_test`：组合操作、条件等待和断言，查询结果后导出截图与报告。见[场景测试](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/reference.md#场景测试与证据)。
+
 ## 适用范围
 
 - 支持现代 `GMProject v1` 项目；运行目标为 **Windows VM**。已验证 IDE 2026.0.0.16 / Runtime 2026.0.0.23，其他版本需自行验证。
@@ -105,7 +109,7 @@ $gameProject = 'D:\Games\MyGame'
 ## 文档与支持
 
 - [安装与客户端配置](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/setup.md)：pipx、源码安装、升级、运行环境和连接排查。
-- [工具与用法](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/reference.md)：全部 58 个工具、音频与精灵设置、运行诊断及支持限制。
+- [工具与用法](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/reference.md)：全部 71 个工具、纹理与音频设置、运行诊断及支持限制。
 - [更新记录](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/CHANGELOG.md) · [报告问题](https://github.com/MKTLMORX/morx-gms2-mcp/issues) · [贡献指南](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/CONTRIBUTING.md) · [安全说明](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/SECURITY.md)
 
 独立社区项目，与 GameMaker 官方无隶属关系。采用 [MIT 许可证](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/LICENSE)。

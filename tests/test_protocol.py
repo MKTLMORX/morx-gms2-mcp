@@ -11,10 +11,14 @@ from tests.test_display import windows_fixture
 from morx_gms2_mcp.display import WINDOWS_PATH
 from morx_gms2_mcp.storage import encode
 from tests.test_audio import make_wav
+from morx_gms2_mcp.textures import new_group
 
 
 class ProtocolTests(ProjectFixture):
     def run_protocol(self, writable):
+        meta = self.project.metadata()
+        meta['TextureGroups'] = [new_group('Default')]
+        self.project.yyp.write_bytes(encode(meta))
         png = self.root / 'protocol.png'
         Image.new('RGBA', (4, 4), (255, 100, 0, 255)).save(png)
         self.project.import_sprite('spr_protocol', [str(png), str(png)])
@@ -43,8 +47,9 @@ class ProtocolTests(ProjectFixture):
                 async with ClientSession(reader, writer) as session:
                     init = await session.initialize()
                     self.assertEqual(init.serverInfo.name, 'morx-gms2-mcp')
+                    self.assertLessEqual(len(init.instructions or ''), 80)
                     tools = (await session.list_tools()).tools
-                    self.assertEqual(len(tools), 58)
+                    self.assertEqual(len(tools), 71)
                     self.assertTrue({'inspect_sprite', 'configure_sprite', 'set_sprite_animation',
                                      'set_game_variables', 'spawn_game_instance',
                                      'destroy_game_instance', 'remove_object_event',
@@ -59,6 +64,57 @@ class ProtocolTests(ProjectFixture):
                         return json.loads(result.content[0].text) if not error else None
                     self.assertEqual((await call('server_info', {}))['writable'], writable)
                     self.assertFalse((await call('runtime_status', {}))['enabled'])
+                    waiting = asyncio.create_task(session.call_tool('runtime_status', arguments={'wait_seconds': 2}))
+                    await asyncio.sleep(.1)
+                    try:
+                        await asyncio.wait_for(call('server_info', {}), 1)
+                        self.assertFalse(waiting.done(), 'stdio 被同步等待阻塞，无法并发响应')
+                    finally:
+                        await waiting
+                    self.assertEqual((await call('list_game_sessions', {}))['sessions'], [])
+                    snapshot = await call('inspect_runtime_snapshot', {'limit': 0})
+                    self.assertGreater(snapshot['file_count'], 0)
+                    self.assertEqual(snapshot['files'], [])
+                    await call('configure_runtime_snapshot', {'dry_run': True})
+                    if writable:
+                        configured = await call('configure_runtime_snapshot', {'dry_run': False})
+                        await call('configure_runtime_snapshot', {'dry_run': False}, True)
+                        await call('restore_backup', {'transaction_id': configured['transaction'], 'dry_run': False})
+                    else:
+                        await call('configure_runtime_snapshot', {'dry_run': False}, True)
+                    groups = await call('inspect_audio_groups', {})
+                    create_audio = {'name': 'audio_protocol', 'expected_project_sha256': groups['project_sha256']}
+                    self.assertTrue((await call('create_audio_group', create_audio))['dry_run'])
+                    if writable:
+                        group_tx = await call('create_audio_group', {**create_audio, 'dry_run': False})
+                        await call('restore_backup', {'transaction_id': group_tx['transaction'], 'dry_run': False})
+                    else:
+                        await call('create_audio_group', {**create_audio, 'dry_run': False}, True)
+                    await call('inspect_game_audio', {'session_id': 'missing'}, True)
+                    await call('game_test_status', {'test_id': 'missing'}, True)
+                    await call('save_game_test_report', {'test_id': 'missing'}, True)
+                    await call('run_game_test', {'session_id': 'missing', 'steps': [{'action': 'capture'}]}, True)
+                    textures = await call('inspect_texture_groups', {})
+                    create = {'name': 'Smooth', 'expected_project_sha256': textures['project_sha256'],
+                              'mips_to_generate': 4, 'border': 8}
+                    self.assertTrue((await call('create_texture_group', create))['dry_run'])
+                    if writable:
+                        made = await call('create_texture_group', {**create, 'dry_run': False})
+                        textures = await call('inspect_texture_groups', {})
+                        member = textures['texture_groups'][0]['members'][0]
+                        assign = {'names': ['spr_protocol'], 'texture_group': 'Smooth',
+                            'expected_project_sha256': textures['project_sha256'],
+                            'expected_resource_sha256': {'spr_protocol': member['sha256']}}
+                        self.assertTrue((await call('assign_sprite_texture_group', assign))['dry_run'])
+                        moved = await call('assign_sprite_texture_group', {**assign, 'dry_run': False})
+                        await call('restore_backup', {'transaction_id': moved['transaction'], 'dry_run': False})
+                        configure = {'name': 'Smooth', 'expected_project_sha256': textures['project_sha256'],
+                                     'autocrop': False, 'dry_run': False}
+                        changed = await call('configure_texture_group', configure)
+                        await call('restore_backup', {'transaction_id': changed['transaction'], 'dry_run': False})
+                        await call('restore_backup', {'transaction_id': made['transaction'], 'dry_run': False})
+                    else:
+                        await call('create_texture_group', {**create, 'dry_run': False}, True)
                     sound = await call('inspect_sound', {'name': 'snd_protocol'})
                     audio_options = {'name': 'snd_protocol', 'expected_sha256': sound['sha256'],
                                      'compression': 'streamed', 'preload': True, 'compression_quality': 7}

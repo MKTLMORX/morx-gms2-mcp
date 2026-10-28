@@ -400,6 +400,59 @@ try {
         case "state":
             mcp_reply(request.request,true,mcp_snapshot(request.args));
             break;
+        case "audio":
+            var audio_args = request.args;
+            var audio_result = {sounds:{},voices:{},groups:{},system_available:audio_system_is_available()};
+            for (var audio_i=0;audio_i<min(32,array_length(audio_args.sound_names));audio_i++) {
+                var audio_name = audio_args.sound_names[audio_i];
+                var audio_asset = asset_get_index(audio_name);
+                var audio_row = {exists:false};
+                try {
+                    if (audio_asset != -1 && asset_get_type(audio_asset)==asset_sound && audio_exists(audio_asset)) {
+                        var audio_group = audio_sound_get_audio_group(audio_asset);
+                        var audio_group_label = audio_group_name(audio_group);
+                        audio_row = {exists:true,playing:audio_is_playing(audio_asset),paused:audio_is_paused(audio_asset),
+                            audio_group:audio_group_label,type:audio_get_type(audio_asset),
+                            asset_gain:audio_sound_get_gain(audio_asset),asset_pitch:audio_sound_get_pitch(audio_asset),
+                            start_offset_seconds:audio_sound_get_track_position(audio_asset),length_seconds:audio_sound_length(audio_asset)};
+                        variable_struct_set(audio_result.groups,audio_group_label,
+                            {loaded:audio_group_is_loaded(audio_group),gain:audio_group_get_gain(audio_group)});
+                    }
+                } catch (audio_error) { audio_row = {error:mcp_text(audio_error.message,256)}; }
+                variable_struct_set(audio_result.sounds,audio_name,audio_row);
+            }
+            for (var voice_i=0;voice_i<min(16,array_length(audio_args.voices));voice_i++) {
+                var voice_spec = audio_args.voices[voice_i];
+                var voice_value = undefined;
+                var voice_row = {status:"missing"};
+                try {
+                    if (voice_spec.scope=="globals") {
+                        if (variable_global_exists(voice_spec.variable)) voice_value=variable_global_get(voice_spec.variable);
+                    } else if (instance_exists(voice_spec.instance_id)) {
+                        if (variable_instance_exists(voice_spec.instance_id,voice_spec.variable))
+                            voice_value=variable_instance_get(voice_spec.instance_id,voice_spec.variable);
+                    }
+                    if (!is_undefined(voice_value)) {
+                        if ((!is_real(voice_value) && !is_int64(voice_value)) || is_bool(voice_value)) {
+                            voice_row={status:"unsupported",error:"Handle variable must contain a sound instance ID"};
+                        } else {
+                            var voice_playing=audio_is_playing(voice_value);
+                            var voice_paused=audio_is_paused(voice_value);
+                            voice_row={status:"inactive",playing:voice_playing,paused:voice_paused};
+                            if (voice_playing || voice_paused) {
+                                voice_row.status="active";
+                                voice_row.asset=audio_get_name(audio_sound_get_asset(voice_value));
+                                voice_row.position_seconds=audio_sound_get_track_position(voice_value);
+                                voice_row.instance_gain=audio_sound_get_gain(voice_value);
+                                voice_row.instance_pitch=audio_sound_get_pitch(voice_value);
+                            }
+                        }
+                    }
+                } catch (voice_error) { voice_row={status:"error",error:mcp_text(voice_error.message,256)}; }
+                variable_struct_set(audio_result.voices,voice_spec.label,voice_row);
+            }
+            mcp_reply(request.request,true,audio_result);
+            break;
         case "set":
             var set_scope = request.args.scope;
             var set_values = request.args.values;

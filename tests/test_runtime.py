@@ -63,6 +63,7 @@ class RuntimeTests(ProjectFixture):
         self.process = FakeProcess()
         with patch('morx_gms2_mcp.runtime.subprocess.Popen', return_value=self.process) as launch:
             result = self.runtime.run(dry_run=False)
+            self.assertTrue(self.runtime.session['preparation_done'].wait(5))
         self.assertFalse(launch.call_args.kwargs['shell'])
         self.assertIn('Windows', launch.call_args.args[0])
         self.assertFalse(any(str(arg).startswith('/of=') for arg in launch.call_args.args[0]))
@@ -808,6 +809,7 @@ class RuntimeTests(ProjectFixture):
         self.process = FakeProcess()
         with patch('morx_gms2_mcp.runtime.subprocess.Popen', return_value=self.process):
             result = self.runtime.run(dry_run=False)
+            self.assertTrue(self.runtime.session['preparation_done'].wait(5))
         self.assertNotEqual(result['session_id'], self.session_id)
 
     def test_redaction_is_case_insensitive_and_covers_sandbox(self):
@@ -819,11 +821,14 @@ class RuntimeTests(ProjectFixture):
     def test_mcp_image_response_and_tool_annotations(self):
         self.launch()
         self.ready()
-        with patch('morx_gms2_mcp.server.Runtime', return_value=self.runtime):
+        from morx_gms2_mcp.sessions import RuntimePool
+        pool = RuntimePool(self.runtime.project, self.options)
+        pool.sessions[self.session_id] = self.runtime
+        with patch('morx_gms2_mcp.server.RuntimePool', return_value=pool):
             server = build_server(self.root, runtime_options=self.options)
         async def verify():
             tools = await server.list_tools()
-            self.assertEqual(len(tools), 58)
+            self.assertEqual(len(tools), 71)
             for tool in tools:
                 if not tool.annotations.readOnlyHint:
                     self.assertTrue(tool.inputSchema['properties']['dry_run']['default'])

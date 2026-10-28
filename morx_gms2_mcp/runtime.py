@@ -2,6 +2,7 @@
 from collections import deque
 from dataclasses import dataclass
 import codecs
+import hashlib
 import io
 import json
 import math
@@ -187,6 +188,7 @@ class Runtime:
         self.options = options or RuntimeOptions()
         self.guard = threading.RLock()
         self.mouse_guard = threading.Lock()
+        self.interaction_guard = threading.RLock()
         self.session = None
         self.process = None
         self.pending = None
@@ -197,6 +199,41 @@ class Runtime:
         self.heartbeat = None
         self.pending_since = None
         self.build_diagnostics = deque(maxlen=100)
+        self.stop_guard = threading.RLock()
+        from .scenarios import SceneTests
+        self.tests = SceneTests(self)
+        self.test_deadline = None
+        self.build_gate = None
+
+    def _test_access(self):
+        if self.tests.active:
+            if threading.current_thread() is not self.tests.worker:
+                raise ValueError('场景测试正在运行；只允许查询状态或 stop_game，避免交叉输入')
+            if self.test_deadline is not None and time.monotonic() >= self.test_deadline:
+                raise ValueError('场景测试时限已到')
+
+    def _state(self, ready=False, code=None):
+        if not self.session:
+            return 'idle'
+        if self.session.get('stopping'):
+            return 'stopping'
+        if self.session.get('stopped'):
+            return 'stopped'
+        if self.session.get('preparation_error'):
+            return 'failed'
+        if self.session.get('phase') in ('queued', 'preparing', 'validating', 'copying'):
+            return 'preparing'
+        return 'running' if ready else 'exited' if code is not None else 'building_or_starting'
+
+    def _phase(self, session, phase):
+        with self.guard:
+            session['phase'] = phase
+            session['phase_started'] = time.monotonic()
+
+    @staticmethod
+    def _check_cancel(session):
+        if session and session.get('cancel') and session['cancel'].is_set():
+            raise InterruptedError('启动准备已取消')
 
     def _bridge(self):
         return self.project.bridge_key()
@@ -299,6 +336,12 @@ class Runtime:
             'failed' if code is not None and code != 0 else \
             'succeeded' if code == 0 and self.session.get('compile_only') else \
             'unverified' if code == 0 or self.session.get('stopped') else 'building'
+        if self.session and self.session.get('preparation_error'):
+            status = 'failed'
+        elif self.session and self.session.get('phase') == 'cancelled':
+            status = 'cancelled'
+        elif self.session and self.session.get('phase') in ('queued', 'preparing', 'validating', 'copying'):
+            status = 'preparing'
         return {'build_status': status, 'compile_error_count': len(self.build_diagnostics),
                 'build_diagnostics': list(self.build_diagnostics), 'compiled': status == 'succeeded'}
 
@@ -343,9 +386,7 @@ class Runtime:
             return {'session_id': session_id, 'errors': selected, 'count': len(selected),
                     'total': len(rows), 'next': selected[-1]['index'] if selected else after,
                     'exit_code': self.process.poll() if self.process is not None else None,
-                    'state': 'stopped' if self.session.get('stopped') else
-                        'running' if self._ready() else 'exited' if self.process is not None and
-                        self.process.poll() is not None else 'building_or_starting'}
+                    'state': self._state(self._ready(), self.process.poll() if self.process else None)}
 
     def status(self, wait_seconds=0):
         integer(wait_seconds, 'wait_seconds', 0, 10)
@@ -358,12 +399,26 @@ class Runtime:
                 result = {'enabled': self.options.enabled, 'configured': bool(self.options.runtime_root and self.options.user_directory),
                     'session_id': self.session['id'] if self.session else None,
                     'bridge_ready': ready, 'exit_code': code,
-                    'state': 'idle' if not self.session else 'stopped' if self.session.get('stopped') else
-                        'running' if ready else 'exited' if code is not None else 'building_or_starting'}
+                    'state': self._state(ready, code)}
+                result['build_pid'] = self.process.pid if self.process is not None else None
+                result['runner_pid'] = None
+                if ready and self.process is not None and os.name == 'nt':
+                    try:
+                        from .win_mouse import find_game_window
+                        window = find_game_window(self.process.pid, 'MORX_Run_' + self.session['id'])
+                        result.update(runner_pid=window.pid, window_handle=window.handle)
+                    except (ValueError, OSError):
+                        result['window_unavailable'] = True
+                result['source_snapshot_sha256'] = self.session.get('source_snapshot_sha256') if self.session else None
                 result['bridge_diagnostics'] = readiness
                 result['bridge_io'] = self._io_status(ready)
                 result.update(self._build_status(ready))
                 if self.session:
+                    result['preparation'] = {key: self.session[key] for key in
+                        ('phase', 'copied_files', 'copied_bytes', 'snapshot', 'preparation_error') if key in self.session}
+                    if 'phase_started' in self.session:
+                        result['preparation']['phase_elapsed_seconds'] = round(
+                            time.monotonic() - self.session['phase_started'], 3)
                     if ready:
                         self.session['build_succeeded'] = True
                     result['error_count'] = len(self._errors())
@@ -383,35 +438,62 @@ class Runtime:
                             result.pop('pending_age_seconds', None)
                             if late.get('response_source'):
                                 result['response_recovery'] = late['response_source']
-                if ready or code is not None or time.monotonic() >= deadline:
+                if ready or code is not None or result['state'] in ('failed', 'stopped', 'stopping') or time.monotonic() >= deadline:
                     return result
             time.sleep(0.05)
 
-    def _copy_project(self, destination, run_name, key):
-        total, count = 0, 0
+    def _copy_project(self, destination, run_name, key, session=None):
+        from .snapshots import plan
+        manifest = []
         with self.project.lock:
-            for directory, folders, files in os.walk(self.project.root, followlinks=False):
-                current = Path(directory)
-                relative_dir = current.relative_to(self.project.root)
-                if current == self.project.root:
-                    folders[:] = [f for f in folders if f not in {'.git', '.codex', '.venv', 'dist', 'build', 'node_modules'}]
-                for folder in folders:
-                    relative = (relative_dir / folder).as_posix()
-                    self.project.path(relative)
-                    (destination / relative).mkdir(parents=True, exist_ok=True)
-                for name in files:
-                    relative = (relative_dir / name).as_posix()
-                    source = current / name
-                    if not link_free(source):
-                        raise ValueError('运行副本不复制链接或目录联接：' + relative)
-                    count += 1
-                    total += source.stat().st_size
-                    if count > 100000 or total > 2 * 1024**3:
-                        raise ValueError('项目运行副本超过 100000 文件或 2 GiB')
-                    shutil.copyfile(source, destination / relative)
+            selection = plan(self.project, check_cancel=lambda: self._check_cancel(session))
+            if session is not None:
+                with self.guard:
+                    session['snapshot'] = {k: v for k, v in selection.items() if k != 'files'}
+            # 提前检查源副本和基础构建余量，最终构建产物大小无法由源码精确预测。
+            needed = selection['total_bytes'] + 256 * 1024**2
+            if shutil.disk_usage(destination).free < needed:
+                raise ValueError('磁盘空间不足：快照及基础余量需要 ' + str(needed) + ' 字节')
+            total = 0
+            for count, (relative, planned_size) in enumerate(sorted(selection['files'].items()), 1):
+                self._check_cancel(session)
+                source = self.project.path(relative)
+                before = source.stat()
+                if before.st_size != planned_size:
+                    raise ValueError('复制前源文件大小已改变：' + relative)
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                file_hash = hashlib.sha256()
+                copied = 0
+                with source.open('rb') as src, target.open('xb') as dst:
+                    while True:
+                        self._check_cancel(session)
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        copied += len(chunk)
+                        total += len(chunk)
+                        if copied > planned_size or total > 2 * 1024**3:
+                            raise ValueError('复制时源文件大小已改变或超过 2 GiB：' + relative)
+                        dst.write(chunk)
+                        file_hash.update(chunk)
+                        if session is not None:
+                            with self.guard:
+                                session['copied_bytes'] += len(chunk)
+                after = source.stat()
+                if copied != planned_size or (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                    raise ValueError('复制期间源文件被修改：' + relative)
+                if session is not None:
+                    with self.guard:
+                        session['copied_files'] = count
+                manifest.append((relative, file_hash.hexdigest()))
+            if session is not None:
+                session['source_snapshot_sha256'] = hashlib.sha256(
+                    compact_encode(sorted(manifest))).hexdigest()
             # GameMaker 模板允许资源直接挂在工程根；副本改名时这些引用也必须更新。
             meta = parse_yy((destination / self.project.yyp.name).read_text(encoding='utf-8-sig'))
             for resource in meta.get('resources', []):
+                self._check_cancel(session)
                 path = destination / resource['id']['path']
                 data = parse_yy(path.read_text(encoding='utf-8-sig'))
                 if replace_refs(data, self.project.yyp.stem, self.project.yyp.name,
@@ -485,69 +567,139 @@ class Runtime:
 
     def run(self, dry_run=True, compile_only=False):
         with self.guard:
+            if self.tests.active:
+                raise ValueError('场景测试尚未结束，请先查询 game_test_status')
             root, user, igor, sandbox = self._configuration()
-            if self.session and not self.session.get('stopped'):
+            if self.session and (not self.session.get('stopped') or self.session.get('stopping')):
                 raise ValueError('已有运行会话，请先 stop_game；即使进程已退出也先读取日志')
             if self.session and self.session.get('cleanup_failed'):
                 raise ValueError('上次会话目录尚未清理，请再次 stop_game 后重试')
-            key = None if compile_only else self._bridge()
-            validation = self.project.validate()
-            if not validation['ok']:
-                raise ValueError('项目结构检查失败，先调用 inspect_project')
             preview = {'dry_run': dry_run, 'project': str(self.project.yyp), 'target': 'Windows VM',
                        'isolated_project': True, 'isolated_save_directory': True,
                        'compile_only': compile_only}
             if dry_run:
+                if not compile_only:
+                    self._bridge()
+                if not self.project.validate()['ok']:
+                    raise ValueError('项目结构检查失败，先调用 inspect_project')
+                from .snapshots import inspect as inspect_snapshot
+                preview['snapshot'] = inspect_snapshot(self.project, limit=0)
                 return preview
             session_id = uuid4().hex
             run_name = 'MORX_Run_' + session_id
-            work_root = child_path(sandbox, '_morx_runs')
-            directory = work_root / session_id
+            directory = child_path(sandbox, '_morx_runs') / session_id
             savedir = child_path(sandbox, run_name)
-            bridge_directory = savedir / 'morx_mcp'
-            session = {'id': session_id, 'bridge': key, 'bridge_directory': bridge_directory,
+            session = {'id': session_id, 'bridge': None, 'bridge_directory': savedir / 'morx_mcp',
                 'directory': directory, 'save_directory': savedir, 'stopped': False,
-                'compile_only': compile_only}
+                'compile_only': compile_only, 'phase': 'preparing', 'phase_started': time.monotonic(),
+                'copied_files': 0, 'copied_bytes': 0, 'cancel': threading.Event(),
+                'preparation_done': threading.Event()}
             self.redactions = [str(user), str(root), str(self.project.root),
                                str(sandbox), str(savedir), str(Path.home())]
+            self.session, self.process, self.pending = session, None, None
+            self.heartbeat = self.pending_since = None
+            self.build_diagnostics.clear()
+            self.lines.clear()
+            self.sequence = 0
+            worker = threading.Thread(target=self._prepare, args=(session, root, user, igor), daemon=True)
+            session['worker'] = worker
+            self.timer = threading.Timer(900, self._expire, args=(session_id,))
+            self.timer.daemon = True
             try:
-                work_root.mkdir(exist_ok=True)
+                worker.start()
+                self.timer.start()
+            except Exception:
+                session['cancel'].set()
+                if worker.ident is None:
+                    session['preparation_done'].set()
+                    session['stopped'] = True
+                raise
+            return {**preview, 'session_id': session_id, 'state': 'preparing',
+                'snapshot_project': str(directory / 'project' / (run_name + '.yyp')),
+                'save_directory': str(savedir), 'compiled': False,
+                'next': '查询 runtime_status 的 preparation、build_status 和 bridge_ready；勿重复启动'}
+
+    def _acquire_build(self, session):
+        if self.build_gate is None:
+            return
+        self._phase(session, 'queued')
+        while not self.build_gate.acquire(timeout=0.1):
+            self._check_cancel(session)
+        try:
+            self._check_cancel(session)
+        except Exception:
+            self.build_gate.release()
+            raise
+
+    def _hold_build(self, session):
+        if self.build_gate is None:
+            return
+        try:
+            # Igor Run 在游戏退出前可能不退出；桥接就绪说明构建已结束。
+            process = self.process
+            while process is not None and process.poll() is None:
+                if not session['cancel'].is_set() and not session['compile_only'] and self._ready():
+                    break
+                time.sleep(0.1)
+        finally:
+            self.build_gate.release()
+
+    def _prepare(self, session, root, user, igor):
+        acquired = False
+        try:
+            self._acquire_build(session)
+            acquired = True
+            self._prepare_impl(session, root, user, igor)
+        except InterruptedError:
+            self._phase(session, 'cancelled')
+        finally:
+            session['preparation_done'].set()
+            if acquired:
+                self._hold_build(session)
+
+    def _prepare_impl(self, session, root, user, igor):
+        try:
+            self._phase(session, 'validating')
+            self._check_cancel(session)
+            with self.project.lock:
+                self._check_cancel(session)
+                key = None if session['compile_only'] else self._bridge()
+                if not self.project.validate()['ok']:
+                    raise ValueError('项目结构检查失败，先调用 inspect_project')
+                self._check_cancel(session)
+                session['bridge'] = key
+                directory = session['directory']
+                directory.parent.mkdir(exist_ok=True)
                 directory.mkdir(exist_ok=False)
                 project_copy = directory / 'project'
                 project_copy.mkdir()
-                yyp = self._copy_project(project_copy, run_name, key)
-                savedir.mkdir(exist_ok=False)
-                bridge_directory.mkdir()
-                atomic_json(bridge_directory / 'session.json', {'session': session_id, 'bridge': key})
-                # Windows Run 不接受 /of：Igor 会在 cwd 下生成 output 并由 Run 步骤自行查找；
-                # 传 /of 会让 Runner 去加载错误的输出文件名。
-                args = [str(igor), '/uf=' + str(user), '/rp=' + str(root), '/project=' + str(yyp),
-                    '/cache=' + str(directory / 'cache'), '/temp=' + str(directory / 'temp'),
-                    '/runtime=VM', '--', 'Windows', 'Compile' if compile_only else 'Run']
+                self._phase(session, 'copying')
+                yyp = self._copy_project(project_copy, 'MORX_Run_' + session['id'], key, session)
+            self._check_cancel(session)
+            session['save_directory'].mkdir(exist_ok=False)
+            session['bridge_directory'].mkdir()
+            atomic_json(session['bridge_directory'] / 'session.json', {'session': session['id'], 'bridge': key})
+            # Windows Run 自行选择输出包，不传 /of。
+            args = [str(igor), '/uf=' + str(user), '/rp=' + str(root), '/project=' + str(yyp),
+                '/cache=' + str(directory / 'cache'), '/temp=' + str(directory / 'temp'),
+                '/runtime=VM', '--', 'Windows', 'Compile' if session['compile_only'] else 'Run']
+            with self.guard:
+                self._check_cancel(session)
                 session['launch_args'] = args
-                self.session, self.pending = session, None
-                self.heartbeat = self.pending_since = None
-                self.build_diagnostics.clear()
-                self.lines.clear()
-                self.sequence = 0
                 self.process = subprocess.Popen(args, cwd=directory, stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-            except OSError as exc:
-                session['stopped'] = True
-                self._cleanup(session)
-                raise ValueError('无法创建运行目录或启动 Igor；检查 Runtime 安装') from exc
-            except Exception:
-                session['stopped'] = True
-                self._cleanup(session)
-                raise
-            threading.Thread(target=self._collect, args=(self.process,), daemon=True).start()
-            self.timer = threading.Timer(900, self._expire, args=(session_id,))
-            self.timer.daemon = True
-            self.timer.start()
-            return {**preview, 'session_id': session_id, 'state': 'building_or_starting',
-                'snapshot_project': str(yyp), 'save_directory': str(savedir), 'compiled': False,
-                'next': '查询 runtime_status；compile_only 以退出码 0 确认编译成功，运行以 bridge_ready 确认就绪'}
+                self._phase(session, 'launched')
+                threading.Thread(target=self._collect, args=(self.process,), daemon=True).start()
+        except InterruptedError:
+            self._phase(session, 'cancelled')
+        except Exception as exc:
+            with self.guard:
+                session['preparation_error'] = {'type': type(exc).__name__,
+                                                'message': self._redact(str(exc)[:2048])}
+                self._phase(session, 'failed')
+        finally:
+            session['preparation_done'].set()
 
     def _collect(self, process):
         buffer, tail = '', ''
@@ -606,9 +758,12 @@ class Runtime:
 
     def request(self, session_id, command, arguments=None, timeout=15):
         with self.guard:
+            self._test_access()
+            if self.tests.active and self.test_deadline is not None:
+                timeout = min(timeout, max(0.001, self.test_deadline - time.monotonic()))
             self._require_session(session_id)
             if command not in {'state', 'capture', 'input', 'wait', 'event',
-                               'set', 'spawn', 'destroy', 'mouse_trace'}:
+                               'set', 'spawn', 'destroy', 'mouse_trace', 'audio'}:
                 raise ValueError('不支持的运行请求')
             if self.pending:
                 raise ValueError('上个请求结果尚未确认；先查询 runtime_status，不要重试有副作用的操作')
@@ -639,6 +794,46 @@ class Runtime:
                     return result
             time.sleep(0.025)
         raise ValueError('运行请求超时，执行结果未知；查询 runtime_status 确认，勿直接重试')
+
+    def _audio_args(self, sound_names=None, voices=None):
+        sound_names = [] if sound_names is None else sound_names
+        voices = [] if voices is None else voices
+        if not isinstance(sound_names, list) or len(sound_names) > 32:
+            raise ValueError('sound_names 最多 32 个声音名')
+        for name in sound_names:
+            if not isinstance(name, str):
+                raise ValueError('声音名必须是字符串')
+            name_check(name)
+        if len(set(sound_names)) != len(sound_names):
+            raise ValueError('声音名重复')
+        if not isinstance(voices, list) or len(voices) > 16:
+            raise ValueError('voices 最多 16 个明确登记的播放句柄变量')
+        labels, normalized = set(), []
+        for voice in voices:
+            if not isinstance(voice, dict) or set(voice) - {'label', 'scope', 'variable', 'instance_id'}:
+                raise ValueError('播放句柄只接受 label/scope/variable/instance_id')
+            label, variable = voice.get('label'), voice.get('variable')
+            if not isinstance(label, str) or not isinstance(variable, str):
+                raise ValueError('播放句柄须提供 label 和 variable')
+            name_check(label)
+            name_check(variable)
+            if label in labels:
+                raise ValueError('播放句柄 label 重复')
+            labels.add(label)
+            scope = voice.get('scope', 'globals')
+            if scope not in ('globals', 'instances'):
+                raise ValueError('句柄 scope 须为 globals 或 instances')
+            if scope == 'instances':
+                target = instance_ref(voice.get('instance_id'))
+            elif 'instance_id' in voice:
+                raise ValueError('全局句柄不能指定 instance_id')
+            else:
+                target = None
+            normalized.append({'label': label, 'variable': variable, 'scope': scope, 'instance_id': target})
+        return {'sound_names': sound_names, 'voices': normalized}
+
+    def inspect_audio(self, session_id, sound_names=None, voices=None, timeout=15):
+        return self.request(session_id, 'audio', self._audio_args(sound_names, voices), timeout=timeout)
 
     def _state_args(self, object_name='', variables=None, limit=32,
                     scope='instances', instance_id=None):
@@ -883,6 +1078,8 @@ class Runtime:
         if not isinstance(step, dict):
             raise ValueError('序列步骤须为对象')
         action = step.get('action')
+        if action == 'mouse':
+            return self._mouse_step(step)
         allowed = {'wait': {'action', 'frames'},
                    'input': {'action', 'keys', 'frames', 'mode'},
                    'capture': {'action'},
@@ -977,6 +1174,11 @@ class Runtime:
                 elif action == 'input':
                     data = self.input(session_id, step['keys'], step['frames'],
                                       dry_run=False, mode=step['mode'])
+                elif action == 'mouse':
+                    data = self.mouse(session_id, step['mouse_action'], dry_run=False,
+                                      **{k: v for k, v in step.items() if k not in ('action', 'mouse_action')})
+                    results.append({'index': index, 'action': action, 'data': data})
+                    continue
                 elif action == 'state':
                     data = self.inspect(session_id, step['object_name'],
                                         step['variables'], step['limit'], step['scope'],
@@ -1009,12 +1211,24 @@ class Runtime:
                 'results': results, 'pictures': pictures}
 
     def input(self, session_id, keys, frames=1, dry_run=True, mode='message'):
+        if not self.interaction_guard.acquire(blocking=False):
+            raise ValueError('上个键鼠动作尚未完成，不能交叉输入')
+        try:
+            return self._input(session_id, keys, frames, dry_run, mode)
+        finally:
+            self.interaction_guard.release()
+
+    def _input(self, session_id, keys, frames=1, dry_run=True, mode='message'):
         """按住按键若干帧。message 通过窗口消息产生真实按下/释放，state 只改桥接按键状态。"""
         integer(frames, 'frames', 1, 300)
+        if not dry_run:
+            self._test_access()
         codes = key_codes(keys)
         if mode not in {'message', 'state'}:
             raise ValueError('按键模式须为 message 或 state')
         with self.guard:
+            if not dry_run:
+                self._test_access()
             self._require_session(session_id)
             if not dry_run and mode == 'message' and not self._ready():
                 raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
@@ -1043,24 +1257,10 @@ class Runtime:
         return self.request(session_id, 'wait', {'frames': frames},
                             timeout=max(15, frames / 10 + 10))
 
-    def mouse(self, session_id, action, x=None, y=None, button='left', delta=0,
-              hold_ms=50, mode='message', dry_run=True, coordinate_space='client',
-              end_x=None, end_y=None, duration_ms=500, steps=20, settle_frames=2):
-        # 整个消息序列与逐帧记录属于同一动作，拒绝并发鼠标调用相互覆盖。
-        if not self.mouse_guard.acquire(blocking=False):
-            raise ValueError('上个鼠标动作尚未完成；等待原操作结果，不要并发或重复输入')
-        try:
-            return self._mouse(session_id, action, x, y, button, delta, hold_ms, mode, dry_run,
-                               coordinate_space, end_x, end_y, duration_ms, steps, settle_frames)
-        finally:
-            self.mouse_guard.release()
-
-    def _mouse(self, session_id, action, x, y, button, delta, hold_ms, mode, dry_run,
-               coordinate_space, end_x, end_y, duration_ms, steps, settle_frames):
-        """向本次运行的游戏窗口投递鼠标动作；坐标为窗口客户区像素。
-        默认 mode=message 使用窗口消息，不移动真实光标、不要求前台焦点；
-        mode=physical 才使用系统级注入。
-        """
+    @staticmethod
+    def _validate_mouse(action, x=None, y=None, button='left', delta=0, hold_ms=50,
+                        mode='message', coordinate_space='client', end_x=None, end_y=None,
+                        duration_ms=500, steps=20, settle_frames=2):
         if action not in {'move', 'click', 'wheel', 'drag'}:
             raise ValueError('鼠标动作须为 move、click、wheel 或 drag')
         if coordinate_space not in {'client', 'physical', 'window', 'gui'}:
@@ -1094,7 +1294,46 @@ class Runtime:
             integer(y, 'y', 0, 32768)
         elif action in {'move', 'click', 'drag'}:
             raise ValueError('move/click/drag 必须提供 x 和 y')
+
+    def _mouse_step(self, step):
+        allowed = {'action', 'mouse_action', 'x', 'y', 'button', 'delta', 'hold_ms', 'mode',
+                   'coordinate_space', 'end_x', 'end_y', 'duration_ms', 'steps', 'settle_frames'}
+        if set(step) - allowed or step.get('mode', 'message') != 'message':
+            raise ValueError('序列鼠标只支持 message 模式及明确的鼠标参数')
+        args = {k: v for k, v in step.items() if k not in ('action', 'mouse_action')}
+        self._validate_mouse(step.get('mouse_action'), **args)
+        return {'action': 'mouse', 'mouse_action': step['mouse_action'], **args}
+
+    def mouse(self, session_id, action, x=None, y=None, button='left', delta=0,
+              hold_ms=50, mode='message', dry_run=True, coordinate_space='client',
+              end_x=None, end_y=None, duration_ms=500, steps=20, settle_frames=2):
+        if not dry_run:
+            self._test_access()
+        # 整个消息序列与逐帧记录属于同一动作，拒绝并发鼠标调用相互覆盖。
+        if not self.mouse_guard.acquire(blocking=False):
+            raise ValueError('上个鼠标动作尚未完成；等待原操作结果，不要并发或重复输入')
+        try:
+            if not self.interaction_guard.acquire(blocking=False):
+                raise ValueError('上个键鼠动作尚未完成，不能交叉输入')
+            try:
+                return self._mouse(session_id, action, x, y, button, delta, hold_ms, mode, dry_run,
+                                   coordinate_space, end_x, end_y, duration_ms, steps, settle_frames)
+            finally:
+                self.interaction_guard.release()
+        finally:
+            self.mouse_guard.release()
+
+    def _mouse(self, session_id, action, x, y, button, delta, hold_ms, mode, dry_run,
+               coordinate_space, end_x, end_y, duration_ms, steps, settle_frames):
+        """向本次运行的游戏窗口投递鼠标动作；坐标为窗口客户区像素。
+        默认 mode=message 使用窗口消息，不移动真实光标、不要求前台焦点；
+        mode=physical 才使用系统级注入。
+        """
+        self._validate_mouse(action, x, y, button, delta, hold_ms, mode, coordinate_space,
+                             end_x, end_y, duration_ms, steps, settle_frames)
         with self.guard:
+            if not dry_run:
+                self._test_access()
             self._require_session(session_id)
             if not self._ready():
                 raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
@@ -1205,10 +1444,26 @@ class Runtime:
             path.unlink(missing_ok=True)
 
     def stop(self, session_id, dry_run=True, _preserve=False):
+        with self.stop_guard:
+            return self._stop(session_id, dry_run, _preserve)
+
+    def _stop(self, session_id, dry_run=True, _preserve=False):
         with self.guard:
             session = self._require_session(session_id)
             if dry_run:
                 return {'dry_run': True, 'session_id': session_id, 'action': 'stop_owned_session'}
+            if self.tests.active:
+                self.tests.cancel.set()
+            if session.get('cancel'):
+                session['cancel'].set()
+            session['stopping'] = True
+            done = session.get('preparation_done')
+        # 等待时释放状态锁；仍在使用目录的准备线程退出前不得删除副本。
+        if done and not done.wait(1):
+            return {'session_id': session_id, 'stopped': False, 'state': 'stopping',
+                    'cleaned': False, 'cleanup': [], 'reason': 'preparation_in_progress',
+                    'next': '准备已请求取消；稍后对同一会话再次 stop_game 完成清理'}
+        with self.guard:
             errors = self._errors()
             self._readiness()
             io_status = self._io_status()
@@ -1241,15 +1496,23 @@ class Runtime:
         if not _preserve:
             cleanup = self._cleanup(session)
             session['cleanup_failed'] = not cleanup['cleaned']
+        session['stopping'] = False
         return {'session_id': session_id, 'stopped': True,
                 'exit_code': process.poll() if process else None, **cleanup,
                 'error_count': len(errors), 'errors': errors, 'bridge_io': io_status}
 
     def restart(self, session_id, dry_run=True):
+        with self.stop_guard:
+            return self._restart(session_id, dry_run)
+
+    def _restart(self, session_id, dry_run=True):
         """同一隔离副本重新执行 Igor Run；保留存档，不接管或拼接外部 Runner 命令。"""
         with self.guard:
+            if self.tests.active:
+                raise ValueError('场景测试尚未结束，不能重启')
             session = self._require_session(session_id)
-            if session.get('stopped') or session.get('compile_only'):
+            if (session.get('stopped') or session.get('stopping') or session.get('compile_only')
+                    or not session.get('launch_args') or session.get('preparation_error')):
                 raise ValueError('restart_game 只接受尚未停止的受管运行会话')
             preview = {'dry_run': dry_run, 'session_id': session_id,
                        'preserve_save': True, 'uses_existing_snapshot': True,
@@ -1267,10 +1530,28 @@ class Runtime:
                 self.pending = None
                 self.build_diagnostics.clear()
                 session.pop('build_succeeded', None)
+                if self.build_gate is not None:
+                    session['cancel'].clear()
+                    session['preparation_done'] = threading.Event()
+                    session['stopped'] = False
+                    self.process = None
+                    self._phase(session, 'queued')
+                    worker = threading.Thread(target=self._restart_prepare, args=(session,), daemon=True)
+                    session['worker'] = worker
+                    try:
+                        worker.start()
+                    except Exception:
+                        session['preparation_done'].set()
+                        raise
+                    self.timer = threading.Timer(900, self._expire, args=(session_id,))
+                    self.timer.daemon = True
+                    self.timer.start()
+                    return {**preview, 'state': 'preparing', 'compiled': False}
                 self.process = subprocess.Popen(session['launch_args'], cwd=session['directory'],
                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
                 session['stopped'] = False
+                self._phase(session, 'launched')
                 threading.Thread(target=self._collect, args=(self.process,), daemon=True).start()
                 self.timer = threading.Timer(900, self._expire, args=(session_id,))
                 self.timer.daemon = True
@@ -1281,9 +1562,37 @@ class Runtime:
                 raise
             return {**preview, 'state': 'building_or_starting', 'compiled': False}
 
+    def _restart_prepare(self, session):
+        acquired = False
+        try:
+            self._acquire_build(session)
+            acquired = True
+            with self.guard:
+                self._check_cancel(session)
+                self.process = subprocess.Popen(session['launch_args'], cwd=session['directory'],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                self._phase(session, 'launched')
+                threading.Thread(target=self._collect, args=(self.process,), daemon=True).start()
+        except InterruptedError:
+            self._phase(session, 'cancelled')
+        except Exception as exc:
+            with self.guard:
+                session['preparation_error'] = {'type': type(exc).__name__, 'message': self._redact(str(exc)[:2048])}
+                self._phase(session, 'failed')
+        finally:
+            session['preparation_done'].set()
+            if acquired:
+                self._hold_build(session)
+
     def _expire(self, session_id):
         try:
-            self.stop(session_id, dry_run=False)
+            result = self.stop(session_id, dry_run=False)
+            if not result['stopped']:
+                with self.guard:
+                    self.timer = threading.Timer(1, self._expire, args=(session_id,))
+                    self.timer.daemon = True
+                    self.timer.start()
         except (ValueError, OSError, subprocess.SubprocessError):
             pass
 

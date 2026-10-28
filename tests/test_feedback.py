@@ -163,6 +163,7 @@ class RuntimeFeedbackTests(core.ProjectFixture):
         process = fixtures.FakeProcess()
         with patch('morx_gms2_mcp.runtime.subprocess.Popen', return_value=process) as launch:
             result = self.runtime.run(False, compile_only=True)
+            self.assertTrue(self.runtime.session['preparation_done'].wait(5))
         self.assertEqual(launch.call_args.args[0][-2:], ['Windows', 'Compile'])
         self.assertNotIn('Run', launch.call_args.args[0])
         self.assertNotIn('sys_morx_runtime', [r['id']['name'] for r in self.project.metadata()['resources']])

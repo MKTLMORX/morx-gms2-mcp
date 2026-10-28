@@ -25,7 +25,10 @@ async def check(project, writable):
                 if response.isError:
                     raise RuntimeError(str(response.content))
                 result[name] = json.loads(response.content[0].text)
-            result['ok'] = len(names) == 58 and {'inspect_sprite', 'configure_sprite', 'set_sprite_animation',
+            result['ok'] = len(names) == 71 and {'inspect_runtime_snapshot', 'configure_runtime_snapshot', 'list_game_sessions', 'inspect_sprite', 'configure_sprite', 'set_sprite_animation',
+                'inspect_audio_groups', 'create_audio_group', 'inspect_game_audio',
+                'run_game_test', 'game_test_status', 'save_game_test_report',
+                'inspect_texture_groups', 'create_texture_group', 'configure_texture_group', 'assign_sprite_texture_group',
                 'inspect_display_settings', 'configure_windows_display', 'configure_room_display',
                 'runtime_status', 'run_game', 'capture_game', 'inspect_game', 'read_code', 'update_code',
                 'set_game_variables', 'spawn_game_instance', 'destroy_game_instance',

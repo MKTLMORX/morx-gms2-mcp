@@ -196,7 +196,7 @@ class Storage:
         parts = PurePosixPath(relative).parts
         first = parts[0]
         if relative in (self.yyp.name, self.yyp.with_suffix('.resource_order').name,
-                        'options/windows/options_windows.yy'):
+                        'options/windows/options_windows.yy', '.codex/morx-snapshot.json'):
             return p
         if first == 'datafiles':
             if len(parts) < 3 or parts[1] != 'fonts':

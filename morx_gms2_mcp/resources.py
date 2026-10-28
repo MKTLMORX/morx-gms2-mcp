@@ -31,7 +31,8 @@ EVENTS = {'Create': (0, 0, 'Create'), 'Destroy': (1, 0, 'Destroy'),
           'GameStart': (7, 2, 'Other'), 'GameEnd': (7, 3, 'Other'),
           'AnimationEnd': (7, 7, 'Other'), 'NoMoreLives': (7, 6, 'Other'),
           'NoMoreHealth': (7, 9, 'Other'), 'EndOfPath': (7, 8, 'Other'),
-          'Outside': (7, 0, 'Other'), 'Boundary': (7, 1, 'Other')}
+          'Outside': (7, 0, 'Other'), 'Boundary': (7, 1, 'Other'),
+          'AsyncNetworking': (7, 68, 'Other'), 'Networking': (7, 68, 'Other')}
 EVENT_STEMS = {0: 'Create', 1: 'Destroy', 2: 'Alarm', 3: 'Step', 4: 'Collision', 5: 'Keyboard',
                6: 'Mouse', 7: 'Other', 8: 'Draw', 9: 'KeyPress', 10: 'KeyRelease', 12: 'CleanUp', 13: 'Gesture'}
 INPUT_EVENTS = {'Keyboard': 5, 'KeyPress': 9, 'KeyRelease': 10}
@@ -73,6 +74,8 @@ def trigger_spec(event, number=0, collision_object=None):
     typ, num, _, collision = event_spec(event, number, collision_object)
     if typ == 8:
         raise ValueError('Draw 事件不能由运行期事件触发器执行')
+    if (typ, num) == (7, 68):
+        raise ValueError('Networking 由真实网络回调触发，不能用事件触发器伪造 async_load')
     if event == 'Collision':
         return 4, 0, collision
     return typ, num, None
@@ -180,6 +183,126 @@ class Edit:
 class Project(Storage):
     def metadata(self):
         return self.read(self.yyp.name)
+
+    def _texture_inventory(self, edit):
+        from . import textures
+        meta = edit.load(self.yyp.name)
+        groups = textures.groups(meta)
+        members = {row['name']: [] for row in groups}
+        for entry in meta.get('resources', []):
+            ref = entry['id']
+            data = edit.load(ref['path'])
+            group = data.get('textureGroupId')
+            if group is None:
+                continue
+            if (not isinstance(group, dict) or group.get('name') not in members
+                    or group.get('path') != 'texturegroups/' + group['name']):
+                raise ValueError('纹理组引用无效：' + ref['name'])
+            members[group['name']].append({'name': ref['name'], 'path': ref['path'],
+                'type': data.get('resourceType'), 'sha256': digest(edit.raw(ref['path'])),
+                'configuration_overrides': bool(data.get('ConfigValues'))})
+        return meta, groups, members
+
+    def inspect_texture_groups(self):
+        from . import textures
+        with self.lock:
+            edit = Edit(self)
+            meta, groups, members = self._texture_inventory(edit)
+            result = []
+            for row in groups:
+                reason = None
+                try:
+                    textures.editable(meta, row)
+                    if any(m['configuration_overrides'] for m in members[row['name']]):
+                        raise ValueError('组内资源含配置覆盖，暂不修改组设置')
+                except ValueError as exc:
+                    reason = str(exc)
+                result.append({'name': row['name'], 'settings': textures.settings(row),
+                    'editable': reason is None, 'unsupported_reason': reason,
+                    'definition': row, 'members': members[row['name']], 'notes': textures.notes(row)})
+            return {'project_sha256': digest(edit.raw(self.yyp.name)), 'texture_groups': result}
+
+    def _texture_hash(self, edit, expected):
+        if not isinstance(expected, str) or not re.fullmatch('[a-f0-9]{64}', expected):
+            raise ValueError('必须提供 inspect_texture_groups 返回的 expected_project_sha256')
+        if digest(edit.raw(self.yyp.name)) != expected:
+            raise ValueError('项目描述已修改，请重新 inspect_texture_groups 并预览')
+
+    def create_texture_group(self, name, expected_project_sha256, mips_to_generate=0,
+                             border=2, autocrop=True, allow_scaling=True, dry_run=True):
+        from . import textures
+        name_check(name)
+        with self.lock:
+            edit = Edit(self)
+            self._texture_hash(edit, expected_project_sha256)
+            meta, groups, _ = self._texture_inventory(edit)
+            if meta.get('ConfigValues'):
+                raise ValueError('项目含配置覆盖，暂不修改')
+            if any(g['name'].casefold() == name.casefold() for g in groups):
+                raise ValueError('纹理组已存在，不覆盖')
+            row = textures.new_group(name)
+            textures.update(row, mips_to_generate, border, autocrop, allow_scaling)
+            groups.append(row)
+            edit.save(self.yyp.name, meta)
+            return {**edit.commit(dry_run), 'name': name, 'settings': textures.settings(row),
+                    'notes': textures.notes(row)}
+
+    def configure_texture_group(self, name, expected_project_sha256, mips_to_generate=None,
+                                border=None, autocrop=None, allow_scaling=None, dry_run=True):
+        from . import textures
+        with self.lock:
+            edit = Edit(self)
+            self._texture_hash(edit, expected_project_sha256)
+            meta, groups, members = self._texture_inventory(edit)
+            row = next((g for g in groups if g['name'] == name), None)
+            if row is None:
+                raise ValueError('纹理组不存在')
+            textures.editable(meta, row)
+            if any(m['configuration_overrides'] for m in members[name]):
+                raise ValueError('组内资源含配置覆盖，暂不修改组设置')
+            before = textures.settings(row)
+            textures.update(row, mips_to_generate, border, autocrop, allow_scaling)
+            edit.save(self.yyp.name, meta)
+            return {**edit.commit(dry_run), 'name': name, 'before': before,
+                    'after': textures.settings(row), 'affected_resources': members[name],
+                    'notes': textures.notes(row)}
+
+    def assign_sprite_texture_group(self, names, texture_group, expected_project_sha256,
+                                    expected_resource_sha256, dry_run=True):
+        from . import textures
+        if (not isinstance(names, list) or not 1 <= len(names) <= 256
+                or any(not isinstance(n, str) for n in names) or len(set(names)) != len(names)):
+            raise ValueError('names 必须为 1～256 个不重复的精灵名')
+        if not isinstance(expected_resource_sha256, dict) or set(expected_resource_sha256) != set(names):
+            raise ValueError('必须提供与 names 完全对应的 expected_resource_sha256')
+        with self.lock:
+            edit = Edit(self)
+            self._texture_hash(edit, expected_project_sha256)
+            meta, groups, _ = self._texture_inventory(edit)
+            table = {g['name']: g for g in groups}
+            if texture_group not in table:
+                raise ValueError('目标纹理组不存在')
+            textures.editable(meta, table[texture_group])
+            textures.update(table[texture_group])
+            changes = []
+            for name in names:
+                ref, data = self._ref(edit, name, 'sprites')
+                expected = expected_resource_sha256[name]
+                if not isinstance(expected, str) or not re.fullmatch('[a-f0-9]{64}', expected):
+                    raise ValueError('精灵哈希无效：' + name)
+                self._check_expected(edit, ref, expected)
+                if (data.get('$GMSprite') != 'v2' or type(data.get('type')) is not int
+                        or data['type'] != 0 or data.get('ConfigValues')):
+                    raise ValueError('只分配无配置覆盖的 GMSprite v2 位图精灵：' + name)
+                old = data.get('textureGroupId')
+                if not old or old['name'] not in table:
+                    raise ValueError('原纹理组引用无效：' + name)
+                textures.editable(meta, table[old['name']])
+                data['textureGroupId'] = {'name': texture_group, 'path': 'texturegroups/' + texture_group}
+                changes.append({'name': name, 'before': old['name'], 'after': texture_group})
+                edit.save(ref['path'], data)
+            return {**edit.commit(dry_run), 'assignments': changes,
+                    'notes': textures.notes(table[texture_group])}
 
     def _code_path(self, edit, name, event, number, collision_object=None):
         ref, data = self._ref(edit, name)
@@ -1258,6 +1381,54 @@ class Project(Storage):
             result = self._sound_summary(edit, ref, data)
             result['audio_groups'] = [item['name'] for item in edit.load(self.yyp.name).get('AudioGroups', [])]
             return result
+
+    def inspect_audio_groups(self):
+        with self.lock:
+            edit = Edit(self)
+            meta = edit.load(self.yyp.name)
+            rows = meta.get('AudioGroups', [])
+            names = [r.get('name') for r in rows]
+            if (any(not isinstance(n, str) or not n for n in names)
+                    or len({n.casefold() for n in names}) != len(names)
+                    or names.count('audiogroup_default') != 1):
+                raise ValueError('音频组缺少默认组或存在重复名称')
+            members = {n: [] for n in names}
+            for entry in meta.get('resources', []):
+                ref = entry['id']
+                if not ref['path'].startswith('sounds/'):
+                    continue
+                data = edit.load(ref['path'])
+                settings = audio.settings(data)
+                if settings['audio_group'] not in members:
+                    raise ValueError('声音音频组引用无效：' + ref['name'])
+                members[settings['audio_group']].append({'name': ref['name'], 'path': ref['path'],
+                    'sha256': digest(edit.raw(ref['path'])), 'streamed': settings['streamed'],
+                    'configuration_overrides': bool(data.get('ConfigValues'))})
+            return {'project_sha256': digest(edit.raw(self.yyp.name)),
+                    'audio_groups': [{'name': r['name'], 'definition': r, 'members': members[r['name']]}
+                                     for r in rows]}
+
+    def create_audio_group(self, name, expected_project_sha256, dry_run=True):
+        name_check(name)
+        with self.lock:
+            edit = Edit(self)
+            if (not isinstance(expected_project_sha256, str)
+                    or not re.fullmatch('[a-f0-9]{64}', expected_project_sha256)
+                    or digest(edit.raw(self.yyp.name)) != expected_project_sha256):
+                raise ValueError('项目哈希无效或过期，请重新 inspect_audio_groups')
+            info = self.inspect_audio_groups()
+            if any(g['name'].casefold() == name.casefold() for g in info['audio_groups']):
+                raise ValueError('音频组已存在，不覆盖')
+            meta = edit.load(self.yyp.name)
+            if meta.get('ConfigValues'):
+                raise ValueError('项目含配置覆盖，暂不创建音频组')
+            if any(r['id']['name'].casefold() == name.casefold() for r in meta.get('resources', [])):
+                raise ValueError('音频组名称与已有资源冲突')
+            meta['AudioGroups'].append({'$GMAudioGroup': 'v1', '%Name': name, 'name': name,
+                'exportDir': '', 'resourceType': 'GMAudioGroup', 'resourceVersion': '2.0', 'targets': -1})
+            edit.save(self.yyp.name, meta)
+            return {**edit.commit(dry_run), 'name': name,
+                    'notes': [audio.PRELOAD_NOTE, '用 configure_sound 分配已有声音；流式声音仍限默认组']}
 
     def configure_sound(self, name, expected_sha256, volume=None, compression=None, preload=None,
                         compression_quality=None, conversion_mode=None, audio_group=None,

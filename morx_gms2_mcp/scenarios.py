@@ -105,8 +105,11 @@ class SceneTests:
                 raise ValueError('测试步骤须为对象')
             action = step.get('action')
             if action in ('assert', 'wait_until'):
-                if set(step) - {'action', 'observe', 'path', 'operator', 'expected', 'timeout_seconds', 'poll_ms'}:
-                    raise ValueError('断言包含未知参数')
+                allowed = {'action', 'observe', 'path', 'operator', 'expected', 'timeout_seconds', 'poll_ms'}
+                unknown = set(step) - allowed
+                if unknown:
+                    raise ValueError('断言包含未知参数：' + ', '.join(sorted(unknown))
+                                     + '；允许参数：' + ', '.join(sorted(allowed)))
                 observe = step.get('observe', {})
                 if not isinstance(observe, dict) or observe.get('action') not in ('state', 'audio'):
                     raise ValueError('observe 须为 state 或 audio 只读步骤')
@@ -118,7 +121,7 @@ class SceneTests:
                     raise ValueError('path 须为 1～24 个字段名/非负索引，不接受表达式')
                 operator = step.get('operator', 'eq')
                 if operator not in ('eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'exists') or 'expected' not in step:
-                    raise ValueError('断言须提供有效 operator 和 expected')
+                    raise ValueError('断言须提供 expected；operator 允许 eq/ne/lt/lte/gt/gte/exists')
                 expected = scalar(step['expected'])
                 if operator == 'exists' and type(expected) is not bool:
                     raise ValueError('exists 的 expected 须为布尔值')

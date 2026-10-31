@@ -22,14 +22,14 @@
 
 ## 功能
 
-71 个工具，覆盖项目制作与运行检查。支持 Codex、Claude Code 等本地 MCP 客户端。
+76 个工具，覆盖项目制作与运行检查。支持 Codex、Claude Code 等本地 MCP 客户端。
 
 | 领域 | 支持的操作 |
 | --- | --- |
 | **运行与检查** | 按依赖生成副本，多客户端隔离运行、键鼠测试、状态断言和证据保存 |
 | **代码与场景** | 读写 GML，创建脚本、物体、网络异步事件、房间、实例和瓦片图层 |
-| **美术与音频** | 编辑精灵和纹理组，配置缩小采样；导入音频与字体，设置声音压缩和流式播放 |
-| **显示与资源** | 配置窗口、相机和视口；整理分组、重命名及删除资源 |
+| **美术与音频** | 编辑精灵和纹理组，导入音频与字体，设置流式播放及导出目录 |
+| **显示与资源** | 配置窗口、相机和视口，设置 Windows 导出信息与图标，整理资源 |
 | **修改与恢复** | 预览变更、检测冲突、保存备份并撤销 |
 
 ## 快速开始
@@ -85,7 +85,11 @@ $gameProject = 'D:\Games\MyGame'
 
 大型项目可先用 `inspect_runtime_snapshot` 查看复制范围和预计大小；联调多个客户端时用 `run_game(new_session=true)` 显式新建会话。
 
+多端运行可选 `launch_mode="direct"`：先编译，再直接启动官方 Runner，编译器会退出。每次启动最长 15 分钟（含准备与编译），`runtime_status.lifecycle` 显示截止时间；到期自动停止并清理。
+
 仅检查编译可用 `compile_game`，无需桥接。`restart_game` 保留测试存档，但使用同一项目快照。完整流程见[运行与观察](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/reference.md#运行与观察)。
+
+耗时事件可用 `trigger_game_event(asynchronous=true)` 提交，再按请求编号查询 `game_request_status`，无需重复触发操作。
 
 ## 使用示例
 
@@ -109,7 +113,7 @@ $gameProject = 'D:\Games\MyGame'
 ## 文档与支持
 
 - [安装与客户端配置](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/setup.md)：pipx、源码安装、升级、运行环境和连接排查。
-- [工具与用法](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/reference.md)：全部 71 个工具、纹理与音频设置、运行诊断及支持限制。
+- [工具与用法](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/reference.md)：全部 76 个工具、导出配置、纹理与音频设置、运行诊断及支持限制。
 - [更新记录](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/CHANGELOG.md) · [报告问题](https://github.com/MKTLMORX/morx-gms2-mcp/issues) · [贡献指南](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/CONTRIBUTING.md) · [安全说明](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/SECURITY.md)
 
 独立社区项目，与 GameMaker 官方无隶属关系。采用 [MIT 许可证](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/LICENSE)。

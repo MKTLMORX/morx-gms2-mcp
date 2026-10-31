@@ -198,6 +198,10 @@ class Storage:
         if relative in (self.yyp.name, self.yyp.with_suffix('.resource_order').name,
                         'options/windows/options_windows.yy', '.codex/morx-snapshot.json'):
             return p
+        if len(parts) == 4 and parts[:3] == ('options', 'windows', 'icons'):
+            from .exports import file_name
+            file_name(parts[-1], '.ico')
+            return p
         if first == 'datafiles':
             if len(parts) < 3 or parts[1] != 'fonts':
                 raise ValueError('只允许写入 datafiles/fonts：' + relative)

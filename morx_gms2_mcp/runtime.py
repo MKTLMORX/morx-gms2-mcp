@@ -1,6 +1,7 @@
 """固定项目的隔离构建、受管理进程与游戏内文件桥接。无桌面抓取或外部监听。"""
-from collections import deque
+from collections import deque, OrderedDict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import codecs
 import hashlib
 import io
@@ -23,6 +24,17 @@ from .storage import compact_encode, encode, parse_yy, replace_retry
 
 CREDENTIAL_OUTPUT = re.compile(
     r'(?i)licen[cs]e|access.?key|api.?key|secret|token|password|authorization|authentication')
+MAX_SESSION_SECONDS = 900
+
+
+def utc_time(value=None):
+    return datetime.fromtimestamp(time.time() if value is None else value, timezone.utc).isoformat()
+
+
+class RuntimeRequestError(ValueError):
+    def __init__(self, message, details):
+        super().__init__(message)
+        self.details = details
 
 
 @dataclass(frozen=True)
@@ -199,11 +211,16 @@ class Runtime:
         self.heartbeat = None
         self.pending_since = None
         self.build_diagnostics = deque(maxlen=100)
+        self.runtime_diagnostics = deque(maxlen=100)
+        self.log_stage = 'compile'
         self.stop_guard = threading.RLock()
         from .scenarios import SceneTests
         self.tests = SceneTests(self)
         self.test_deadline = None
         self.build_gate = None
+        self.request_history = OrderedDict()
+        self.last_request_error = None
+        self.last_event_completed = None
 
     def _test_access(self):
         if self.tests.active:
@@ -223,12 +240,47 @@ class Runtime:
             return 'failed'
         if self.session.get('phase') in ('queued', 'preparing', 'validating', 'copying'):
             return 'preparing'
+        if self.session.get('launch_mode') == 'direct' and self.session.get('process_kind') == 'build' and code == 0:
+            return 'building_or_starting'
         return 'running' if ready else 'exited' if code is not None else 'building_or_starting'
 
     def _phase(self, session, phase):
         with self.guard:
             session['phase'] = phase
             session['phase_started'] = time.monotonic()
+
+    def _arm_deadline(self, session):
+        now = time.time()
+        session.update(created_at=utc_time(now), expires_at=utc_time(now + MAX_SESSION_SECONDS),
+                       deadline=time.monotonic() + MAX_SESSION_SECONDS)
+        self.timer = threading.Timer(MAX_SESSION_SECONDS, self._expire,
+                                     args=(session['id'], 'session_timeout', session['deadline']))
+        self.timer.daemon = True
+        self.timer.start()
+
+    def _lifecycle(self, code=None):
+        session = self.session
+        if not session:
+            return {'max_session_seconds': MAX_SESSION_SECONDS, 'includes_preparation': True}
+        build_transition = (session.get('launch_mode') == 'direct'
+                            and session.get('process_kind') == 'build' and code == 0
+                            and not session.get('preparation_error'))
+        if code is not None and not build_transition and not session.get('stopped') and 'exit' not in session:
+            errors = self._errors()
+            reason = ('runtime_exception' if any(e.get('stage') == 'unhandled' for e in errors)
+                      else 'compile_completed' if session.get('compile_only') and code == 0
+                      else 'process_failed' if code != 0 else 'process_exited')
+            session['exit'] = {'reason': reason, 'source': 'process', 'exit_code': code,
+                               'observed_at': utc_time()}
+        result = {'max_session_seconds': MAX_SESSION_SECONDS, 'includes_preparation': True,
+                  'created_at': session.get('created_at'), 'expires_at': session.get('expires_at'),
+                  'remaining_seconds': max(0, round(session.get('deadline', time.monotonic()) - time.monotonic(), 1))
+                        if not session.get('stopped') else 0}
+        result['expires_soon'] = not session.get('stopped') and result['remaining_seconds'] <= 60
+        for field in ('termination', 'exit', 'stopped_at', 'previous_termination', 'previous_exit'):
+            if field in session:
+                result[field] = dict(session[field]) if isinstance(session[field], dict) else session[field]
+        return result
 
     @staticmethod
     def _check_cancel(session):
@@ -282,6 +334,11 @@ class Runtime:
                     return {'ready': False, 'reason': 'heartbeat_identity_mismatch'}
                 self.heartbeat = {'mtime': path.stat().st_mtime, 'frame': data.get('frame'),
                                   'bridge_io': bridge_io_summary(data.get('bridge_io'))}
+                activity = data.get('activity')
+                if (isinstance(activity, dict) and isinstance(activity.get('request'), str)
+                        and re.fullmatch('[a-f0-9]{32}', activity['request'])
+                        and activity.get('state') in ('executing', 'completed')):
+                    self.heartbeat['activity'] = {'request_id': activity['request'], 'state': activity['state']}
                 reason = 'heartbeat_received'
                 break
             except (OSError, json.JSONDecodeError, UnicodeError) as exc:
@@ -294,7 +351,10 @@ class Runtime:
             age = max(0, time.time() - self.heartbeat['mtime'])
             return {'ready': age < 10, 'reason': 'heartbeat_stale' if age >= 10 else reason,
                     'heartbeat_age_seconds': round(age, 3), 'heartbeat_frame': self.heartbeat['frame'],
-                    'cached': reason != 'heartbeat_received'}
+                    'cached': reason != 'heartbeat_received',
+                    'activity': self.heartbeat.get('activity'),
+                    'accepting_requests': age < 10 and self.pending is None,
+                    'note': 'activity 是最后确认的执行阶段，过期心跳不能证明事件仍在执行或进程健康'}
         return {'ready': False, 'reason': reason, 'heartbeat_age_seconds': None}
 
     def _ready(self):
@@ -336,17 +396,21 @@ class Runtime:
             'failed' if code is not None and code != 0 else \
             'succeeded' if code == 0 and self.session.get('compile_only') else \
             'unverified' if code == 0 or self.session.get('stopped') else 'building'
-        if self.session and self.session.get('preparation_error'):
+        if self.session and self.session.get('preparation_error') and not self.session.get('build_succeeded'):
             status = 'failed'
         elif self.session and self.session.get('phase') == 'cancelled':
             status = 'cancelled'
         elif self.session and self.session.get('phase') in ('queued', 'preparing', 'validating', 'copying'):
             status = 'preparing'
         return {'build_status': status, 'compile_error_count': len(self.build_diagnostics),
-                'build_diagnostics': list(self.build_diagnostics), 'compiled': status == 'succeeded'}
+                'build_diagnostics': list(self.build_diagnostics), 'compiled': status == 'succeeded',
+                'runtime_log_error_count': len(self.runtime_diagnostics),
+                'runtime_log_diagnostics': list(self.runtime_diagnostics)}
 
     def _errors(self):
         """读取桥接捕获的运行时异常；文件不存在、过期或损坏时返回空列表。"""
+        if self.session and self.session.get('stopped'):
+            return list(self.session.get('retained_errors', []))
         try:
             data = bounded_json(self._file('errors.json'), 2 * 1024 * 1024)
         except (OSError, ValueError, UnicodeError):
@@ -400,8 +464,11 @@ class Runtime:
                     'session_id': self.session['id'] if self.session else None,
                     'bridge_ready': ready, 'exit_code': code,
                     'state': self._state(ready, code)}
-                result['build_pid'] = self.process.pid if self.process is not None else None
-                result['runner_pid'] = None
+                result['build_pid'] = self.session.get('build_pid') if self.session else None
+                result['runner_pid'] = (self.process.pid if self.process is not None and self.session
+                                        and self.session.get('process_kind') == 'runner' else None)
+                result['build_exit_code'] = (code if self.session.get('compile_only')
+                    else self.session.get('build_exit_code')) if self.session else None
                 if ready and self.process is not None and os.name == 'nt':
                     try:
                         from .win_mouse import find_game_window
@@ -414,6 +481,11 @@ class Runtime:
                 result['bridge_io'] = self._io_status(ready)
                 result.update(self._build_status(ready))
                 if self.session:
+                    result['last_request_error'] = self.last_request_error
+                    result['lifecycle'] = self._lifecycle(code)
+                    termination = self.session.get('termination', self.session.get('exit', {}))
+                    result.update(stop_reason=termination.get('reason'), stop_source=termination.get('source'),
+                                  launch_mode=self.session.get('launch_mode', 'igor'))
                     result['preparation'] = {key: self.session[key] for key in
                         ('phase', 'copied_files', 'copied_bytes', 'snapshot', 'preparation_error') if key in self.session}
                     if 'phase_started' in self.session:
@@ -421,14 +493,20 @@ class Runtime:
                             time.monotonic() - self.session['phase_started'], 3)
                     if ready:
                         self.session['build_succeeded'] = True
-                    result['error_count'] = len(self._errors())
+                    errors = self._errors()
+                    result['error_count'] = len(errors)
+                    result['last_runtime_error'] = errors[-1] if errors else None
                 if self.pending:
                     result['pending_request'] = self.pending
                     result['pending_age_seconds'] = round(time.monotonic() - self.pending_since, 3) if self.pending_since else None
                     try:
-                        late = self._response(self.pending)
+                        late = self._complete_request(self.pending)
                     except ValueError as exc:
                         result['response_error'] = self._redact(str(exc))
+                        failed_id = self.pending
+                        if failed_id in self.request_history:
+                            self.request_history[failed_id].update(state='invalid_response', execution_unknown=True)
+                        result['last_request_error'] = self._request_error(str(exc), 'invalid_response', failed_id, True).details
                         self.pending = None
                     else:
                         if late:
@@ -565,7 +643,9 @@ class Runtime:
                 pass
         return {'cleaned': all(item['cleaned'] for item in results), 'cleanup': results}
 
-    def run(self, dry_run=True, compile_only=False):
+    def run(self, dry_run=True, compile_only=False, launch_mode='igor'):
+        if launch_mode not in ('igor', 'direct') or (compile_only and launch_mode != 'igor'):
+            raise ValueError('launch_mode 须为 igor 或 direct；只编译不接受 direct')
         with self.guard:
             if self.tests.active:
                 raise ValueError('场景测试尚未结束，请先查询 game_test_status')
@@ -576,7 +656,13 @@ class Runtime:
                 raise ValueError('上次会话目录尚未清理，请再次 stop_game 后重试')
             preview = {'dry_run': dry_run, 'project': str(self.project.yyp), 'target': 'Windows VM',
                        'isolated_project': True, 'isolated_save_directory': True,
-                       'compile_only': compile_only}
+                       'compile_only': compile_only, 'launch_mode': launch_mode,
+                       'lifecycle': {'max_session_seconds': MAX_SESSION_SECONDS, 'includes_preparation': True},
+                       'resource_cost': {'resident_build_process': not compile_only and launch_mode == 'igor',
+                           'runner_per_client': 0 if compile_only else 1, 'memory_estimate_bytes': None,
+                           'note': '内存取决于项目和 Runtime；direct 编译结束后 Igor 退出，再启动独立 Runner，每端仍独立编译。'}}
+            if launch_mode == 'direct' and not (root / 'windows/x64/Runner.exe').is_file():
+                raise ValueError('direct 模式需要本机 Runtime 的 windows/x64/Runner.exe')
             if dry_run:
                 if not compile_only:
                     self._bridge()
@@ -592,6 +678,7 @@ class Runtime:
             session = {'id': session_id, 'bridge': None, 'bridge_directory': savedir / 'morx_mcp',
                 'directory': directory, 'save_directory': savedir, 'stopped': False,
                 'compile_only': compile_only, 'phase': 'preparing', 'phase_started': time.monotonic(),
+                'launch_mode': launch_mode, 'process_kind': 'build',
                 'copied_files': 0, 'copied_bytes': 0, 'cancel': threading.Event(),
                 'preparation_done': threading.Event()}
             self.redactions = [str(user), str(root), str(self.project.root),
@@ -599,15 +686,17 @@ class Runtime:
             self.session, self.process, self.pending = session, None, None
             self.heartbeat = self.pending_since = None
             self.build_diagnostics.clear()
+            self.runtime_diagnostics.clear()
+            self.log_stage = 'compile'
             self.lines.clear()
             self.sequence = 0
+            self.request_history.clear()
+            self.last_request_error = self.last_event_completed = None
             worker = threading.Thread(target=self._prepare, args=(session, root, user, igor), daemon=True)
             session['worker'] = worker
-            self.timer = threading.Timer(900, self._expire, args=(session_id,))
-            self.timer.daemon = True
             try:
+                self._arm_deadline(session)
                 worker.start()
-                self.timer.start()
             except Exception:
                 session['cancel'].set()
                 if worker.ident is None:
@@ -615,6 +704,7 @@ class Runtime:
                     session['stopped'] = True
                 raise
             return {**preview, 'session_id': session_id, 'state': 'preparing',
+                'lifecycle': self._lifecycle(),
                 'snapshot_project': str(directory / 'project' / (run_name + '.yyp')),
                 'save_directory': str(savedir), 'compiled': False,
                 'next': '查询 runtime_status 的 preparation、build_status 和 bridge_ready；勿重复启动'}
@@ -638,6 +728,8 @@ class Runtime:
             # Igor Run 在游戏退出前可能不退出；桥接就绪说明构建已结束。
             process = self.process
             while process is not None and process.poll() is None:
+                if session.get('launch_mode') == 'direct' and session.get('process_kind') == 'runner':
+                    break
                 if not session['cancel'].is_set() and not session['compile_only'] and self._ready():
                     break
                 time.sleep(0.1)
@@ -682,15 +774,33 @@ class Runtime:
             # Windows Run 自行选择输出包，不传 /of。
             args = [str(igor), '/uf=' + str(user), '/rp=' + str(root), '/project=' + str(yyp),
                 '/cache=' + str(directory / 'cache'), '/temp=' + str(directory / 'temp'),
-                '/runtime=VM', '--', 'Windows', 'Compile' if session['compile_only'] else 'Run']
+                '/runtime=VM', '--', 'Windows',
+                'Compile' if session['compile_only'] or session['launch_mode'] == 'direct' else 'Run']
             with self.guard:
                 self._check_cancel(session)
                 session['launch_args'] = args
                 self.process = subprocess.Popen(args, cwd=directory, stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                session['build_pid'] = self.process.pid
                 self._phase(session, 'launched')
-                threading.Thread(target=self._collect, args=(self.process,), daemon=True).start()
+                collector = threading.Thread(target=self._collect, args=(self.process,), daemon=True)
+                collector.start()
+            if session['launch_mode'] == 'direct':
+                builder = self.process
+                while builder.poll() is None:
+                    self._check_cancel(session)
+                    time.sleep(.05)
+                collector.join(3)
+                if collector.is_alive():
+                    raise ValueError('编译日志尚未关闭，未启动 Runner')
+                with self.guard:
+                    self._check_cancel(session)
+                    session['build_exit_code'] = builder.poll()
+                    if session['build_exit_code'] != 0:
+                        return
+                    session['build_succeeded'] = True
+                    self._launch_runner(session, root)
         except InterruptedError:
             self._phase(session, 'cancelled')
         except Exception as exc:
@@ -700,6 +810,39 @@ class Runtime:
                 self._phase(session, 'failed')
         finally:
             session['preparation_done'].set()
+
+    def _runner_command(self, session, root):
+        run_name = 'MORX_Run_' + session['id']
+        package = session['directory'] / 'output' / run_name / (run_name + '.win')
+        runner = root / 'windows/x64/Runner.exe'
+        if not link_free(package) or not package.is_file() or not runner.is_file():
+            raise ValueError('编译产物或官方 Runner 不存在，未启动游戏')
+        if not 0 < package.stat().st_size <= 2 * 1024**3:
+            raise ValueError('编译产物大小无效')
+        # 此 Runtime 的 Runner 要求 -game 路径始终带引号，包含无空格路径。
+        # Windows 文件名不允许双引号；不经 shell，也不接受调用方命令或外部产物。
+        command = subprocess.list2cmdline([str(runner)]) + ' -game "' + str(package) + '"'
+        return command, package
+
+    def _launch_runner(self, session, root, verify=False):
+        command, package = self._runner_command(session, root)
+        hasher = hashlib.sha256()
+        with package.open('rb') as source:
+            for block in iter(lambda: source.read(1024 * 1024), b''):
+                self._check_cancel(session)
+                hasher.update(block)
+        checksum = hasher.hexdigest()
+        if verify and checksum != session.get('artifact_sha256'):
+            raise ValueError('编译产物已改变，不能重启；请新建会话')
+        self._check_cancel(session)
+        process = subprocess.Popen(command, cwd=package.parent, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+        self.process = process
+        session.update(process_kind='runner', artifact_sha256=checksum)
+        self.log_stage = 'runtime'
+        self._phase(session, 'launched')
+        threading.Thread(target=self._collect, args=(process,), daemon=True).start()
 
     def _collect(self, process):
         buffer, tail = '', ''
@@ -733,6 +876,9 @@ class Runtime:
             process.stdout.close()
 
     def _log(self, line, process=None):
+        # Igor 在 Runner 启动前打印命令。使用受支持的 -game 启动边界，
+        # 不将任意 "Final Compile finished" 文本或含 error 的网络日志当作构建结果。
+        runner_launch = bool(re.search(r'(?i)\.exe["\s]+\s*-game\s+', line))
         if CREDENTIAL_OUTPUT.search(line):
             line = '[credential-related output omitted]'
         else:
@@ -740,11 +886,14 @@ class Runtime:
         with self.guard:
             if process is not None and process is not self.process:
                 return
+            if runner_launch:
+                self.log_stage = 'runtime'
             if re.search(r'(?i)\b(?:error|fatal)\b|\bat line \d+\s*:', line) and not re.search(
                     r'(?i)\b(?:no errors|0 errors|error_count|errors?\s*[:=]\s*0)\b', line):
-                self.build_diagnostics.append(line[:2048])
+                target = self.runtime_diagnostics if self.log_stage == 'runtime' else self.build_diagnostics
+                target.append(line[:2048])
             self.sequence += 1
-            self.lines.append({'cursor': self.sequence, 'text': line.rstrip('\r')})
+            self.lines.append({'cursor': self.sequence, 'text': line.rstrip('\r'), 'stage': self.log_stage})
 
     def output(self, session_id, after=0, limit=100):
         integer(after, 'after', 0, 2**63 - 1)
@@ -756,7 +905,78 @@ class Runtime:
                 'truncated': bool(self.lines and after < self.lines[0]['cursor'] - 1),
                 'exit_code': self.process.poll() if self.process else None}
 
-    def request(self, session_id, command, arguments=None, timeout=15):
+    def _request_error(self, message, code, request_id=None, execution_unknown=False):
+        message = self._redact(message[:4096])
+        details = {'code': code, 'message': message, 'diagnostic_id': uuid4().hex,
+                   'session_id': self.session['id'] if self.session else None,
+                   'request_id': request_id, 'execution_unknown': execution_unknown,
+                   'recorded_at': utc_time(), 'next': '查询 runtime_status 或 game_request_status；不自动重放有副作用的操作'}
+        self.last_request_error = details
+        return RuntimeRequestError(message, details)
+
+    def _complete_request(self, request_id):
+        record = self.request_history.get(request_id)
+        if record and record.get('result') is not None:
+            return json.loads(json.dumps(record['result']))
+        result = self._response(request_id)
+        if result:
+            if record is not None:
+                record.update(state='completed' if result['ok'] else 'failed', completed_at=utc_time())
+                if len(compact_encode(result)) <= 256 * 1024:
+                    record['result'] = json.loads(json.dumps(result))
+                else:
+                    record['result_retained'] = False
+                if record['command'] == 'event':
+                    self.last_event_completed = time.monotonic()
+            if self.pending == request_id:
+                self.pending = None
+                self.pending_since = None
+        return result
+
+    def request_status(self, session_id, request_id, wait_seconds=0):
+        integer(wait_seconds, 'wait_seconds', 0, 10)
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            with self.guard:
+                self._require_session(session_id)
+                record = self.request_history.get(request_id)
+                if record is None:
+                    raise ValueError('请求编号不匹配或已淘汰；每个会话最多保留16条请求记录')
+                if record['state'] == 'pending' and not self.session.get('stopped'):
+                    try:
+                        self._complete_request(request_id)
+                    except ValueError as exc:
+                        self.pending = None
+                        record.update(state='invalid_response', execution_unknown=True)
+                        raise self._request_error(str(exc), 'invalid_response', request_id, True) from None
+                result = json.loads(json.dumps(record))
+                result.update(session_id=session_id, request_id=request_id,
+                    bridge_diagnostics=self._readiness())
+                if record['state'] != 'pending' or time.monotonic() >= deadline:
+                    return result
+            time.sleep(.025)
+
+    def _wait_after_event(self, session_id, command):
+        if command not in ('state', 'audio'):
+            return
+        deadline = time.monotonic() + 2
+        while True:
+            with self.guard:
+                self._require_session(session_id)
+                if (self.pending or self.last_event_completed is None
+                        or time.monotonic() - self.last_event_completed > 2):
+                    return
+                readiness = self._readiness()
+                if readiness['ready'] or readiness['reason'] not in ('heartbeat_stale', 'heartbeat_missing'):
+                    return
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(.025)
+
+    def request(self, session_id, command, arguments=None, timeout=15, asynchronous=False):
+        if type(asynchronous) is not bool or (asynchronous and command != 'event'):
+            raise ValueError('异步提交仅支持 event')
+        self._wait_after_event(session_id, command)
         with self.guard:
             self._test_access()
             if self.tests.active and self.test_deadline is not None:
@@ -766,34 +986,49 @@ class Runtime:
                                'set', 'spawn', 'destroy', 'mouse_trace', 'audio'}:
                 raise ValueError('不支持的运行请求')
             if self.pending:
-                raise ValueError('上个请求结果尚未确认；先查询 runtime_status，不要重试有副作用的操作')
+                raise self._request_error('上个请求结果尚未确认；先查询 runtime_status，不要重试有副作用的操作',
+                                          'request_pending', self.pending, True)
             readiness = self._readiness()
             if not readiness['ready']:
-                raise ValueError('游戏桥接未就绪：' + readiness['reason'] + '；查询 runtime_status 和 get_runtime_output')
+                raise self._request_error('游戏桥接未就绪：' + readiness['reason'] + '；查询 runtime_status 和 get_runtime_output',
+                                          readiness['reason'])
             request_id = uuid4().hex
             self.pending = request_id
             self.pending_since = time.monotonic()
-            atomic_json(self._file('request.json'), {'session': session_id, 'request': request_id,
-                'command': command, 'args': arguments or {}})
+            self.request_history[request_id] = {'command': command, 'state': 'pending', 'submitted_at': utc_time()}
+            while len(self.request_history) > 16:
+                self.request_history.popitem(last=False)
+            try:
+                atomic_json(self._file('request.json'), {'session': session_id, 'request': request_id,
+                    'command': command, 'args': arguments or {}})
+            except (OSError, ValueError) as exc:
+                raise self._request_error('运行请求文件写入失败：' + str(exc), 'request_io_error', request_id, True) from None
+            if asynchronous:
+                return {'session_id': session_id, 'request_id': request_id, 'state': 'pending',
+                        'next': '调用 game_request_status 查询原请求，不重复触发事件'}
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             with self.guard:
                 if not self.session or self.session['id'] != session_id or self.session.get('stopped'):
                     raise ValueError('运行会话已停止')
                 try:
-                    result = self._response(request_id)
+                    result = self._complete_request(request_id)
                 except ValueError as exc:
                     self.pending = None
-                    raise ValueError(self._redact(str(exc))) from None
+                    self.request_history[request_id].update(state='invalid_response', execution_unknown=True)
+                    raise self._request_error(str(exc), 'invalid_response', request_id, True) from None
                 if result:
                     self.pending = None
                     if not result['ok']:
-                        raise ValueError(self._redact(str(result['data'].get('error', '游戏请求失败'))))
+                        raise self._request_error(str(result['data'].get('error', '游戏请求失败')), 'game_command_failed', request_id)
                     if command == 'capture':
                         result['image'] = self._capture_bytes(request_id)
                     return result
             time.sleep(0.025)
-        raise ValueError('运行请求超时，执行结果未知；查询 runtime_status 确认，勿直接重试')
+        with self.guard:
+            self.request_history[request_id]['wait_timed_out'] = True
+            raise self._request_error('运行请求超时，执行结果未知；查询 runtime_status 确认，勿直接重试',
+                                      'request_timeout', request_id, True)
 
     def _audio_args(self, sound_names=None, voices=None):
         sound_names = [] if sound_names is None else sound_names
@@ -1061,18 +1296,18 @@ class Runtime:
         return args
 
     def trigger_event(self, session_id, object_name, event, number=0, collision_object=None,
-                      key=None, instance_id=None, limit=32, dry_run=True):
+                      key=None, instance_id=None, limit=32, dry_run=True, asynchronous=False):
         """通过桥接数据执行 event_perform；不注入物理输入，不改变前台窗口。"""
+        if type(asynchronous) is not bool:
+            raise ValueError('asynchronous 须为布尔值')
         args = self._event_args(object_name, event, number, collision_object, key,
                                 instance_id, limit)
         with self.guard:
             self._require_session(session_id)
-            if not dry_run and not self._ready():
-                raise ValueError('游戏桥接未就绪；查询 runtime_status 和 get_runtime_output')
-        preview = {'dry_run': dry_run, 'session_id': session_id, **args}
+        preview = {'dry_run': dry_run, 'session_id': session_id, 'asynchronous': asynchronous, **args}
         if dry_run:
             return preview
-        return self.request(session_id, 'event', args)
+        return self.request(session_id, 'event', args, asynchronous=asynchronous)
 
     def _sequence_step(self, step):
         if not isinstance(step, dict):
@@ -1443,15 +1678,18 @@ class Runtime:
         finally:
             path.unlink(missing_ok=True)
 
-    def stop(self, session_id, dry_run=True, _preserve=False):
+    def stop(self, session_id, dry_run=True, _preserve=False, _source='stop_game'):
         with self.stop_guard:
-            return self._stop(session_id, dry_run, _preserve)
+            return self._stop(session_id, dry_run, _preserve, _source)
 
-    def _stop(self, session_id, dry_run=True, _preserve=False):
+    def _stop(self, session_id, dry_run=True, _preserve=False, _source='stop_game'):
         with self.guard:
             session = self._require_session(session_id)
             if dry_run:
                 return {'dry_run': True, 'session_id': session_id, 'action': 'stop_owned_session'}
+            session.setdefault('termination', {'reason': _source, 'source':
+                'timer' if _source == 'session_timeout' else 'service' if _source == 'service_shutdown' else 'tool',
+                'requested_at': utc_time()})
             if self.tests.active:
                 self.tests.cancel.set()
             if session.get('cancel'):
@@ -1464,13 +1702,17 @@ class Runtime:
                     'cleaned': False, 'cleanup': [], 'reason': 'preparation_in_progress',
                     'next': '准备已请求取消；稍后对同一会话再次 stop_game 完成清理'}
         with self.guard:
+            self._lifecycle(self.process.poll() if self.process else None)
             errors = self._errors()
             self._readiness()
             io_status = self._io_status()
             if not session.get('stopped'):
+                session['retained_errors'] = errors
                 # 删除会话文件本身就是桥接的退出信号，下一帧 BeginStep 会结束游戏。
                 self._file('session.json').unlink(missing_ok=True)
                 session['stopped'] = True
+                if self.pending in self.request_history:
+                    self.request_history[self.pending].update(state='stopped_unknown', execution_unknown=True)
                 self.pending = None
                 if self.timer:
                     self.timer.cancel()
@@ -1497,9 +1739,12 @@ class Runtime:
             cleanup = self._cleanup(session)
             session['cleanup_failed'] = not cleanup['cleaned']
         session['stopping'] = False
+        session.setdefault('stopped_at', utc_time())
         return {'session_id': session_id, 'stopped': True,
                 'exit_code': process.poll() if process else None, **cleanup,
-                'error_count': len(errors), 'errors': errors, 'bridge_io': io_status}
+                'error_count': len(errors), 'errors': errors, 'bridge_io': io_status,
+                'stop_reason': session['termination']['reason'],
+                'stop_source': session['termination']['source'], 'lifecycle': self._lifecycle()}
 
     def restart(self, session_id, dry_run=True):
         with self.stop_guard:
@@ -1516,11 +1761,13 @@ class Runtime:
                 raise ValueError('restart_game 只接受尚未停止的受管运行会话')
             preview = {'dry_run': dry_run, 'session_id': session_id,
                        'preserve_save': True, 'uses_existing_snapshot': True,
-                       'rebuilds_snapshot': True}
+                       'rebuilds_snapshot': session.get('launch_mode') != 'direct'}
             if dry_run:
                 return preview
             self._configuration()
-            self.stop(session_id, dry_run=False, _preserve=True)
+            stopped = self.stop(session_id, dry_run=False, _preserve=True, _source='restart_game')
+            if not stopped['stopped']:
+                raise ValueError('旧进程准备尚未结束，稍后重试 restart_game')
             try:
                 for name in ('ready.json', 'ready.json.tmp', 'response.json', 'response.json.tmp',
                              'request.json', 'errors.json', 'errors.json.tmp'):
@@ -1529,7 +1776,26 @@ class Runtime:
                 self.heartbeat = self.pending_since = None
                 self.pending = None
                 self.build_diagnostics.clear()
+                self.runtime_diagnostics.clear()
+                self.request_history.clear()
+                self.last_request_error = self.last_event_completed = None
+                self.log_stage = 'compile'
+                session['previous_termination'] = dict(session['termination'])
+                if 'exit' in session:
+                    session['previous_exit'] = dict(session['exit'])
+                else:
+                    session.pop('previous_exit', None)
+                for field in ('termination', 'exit', 'stopped_at', 'retained_errors'):
+                    session.pop(field, None)
                 session.pop('build_succeeded', None)
+                if session.get('launch_mode') == 'direct':
+                    session['cancel'].clear()
+                    session['stopped'] = False
+                    session['build_succeeded'] = True
+                    self._launch_runner(session, Path(self.options.runtime_root), verify=True)
+                    self._arm_deadline(session)
+                    return {**preview, 'state': 'building_or_starting', 'compiled': True,
+                            'lifecycle': self._lifecycle()}
                 if self.build_gate is not None:
                     session['cancel'].clear()
                     session['preparation_done'] = threading.Event()
@@ -1543,24 +1809,26 @@ class Runtime:
                     except Exception:
                         session['preparation_done'].set()
                         raise
-                    self.timer = threading.Timer(900, self._expire, args=(session_id,))
-                    self.timer.daemon = True
-                    self.timer.start()
-                    return {**preview, 'state': 'preparing', 'compiled': False}
+                    self._arm_deadline(session)
+                    return {**preview, 'state': 'preparing', 'compiled': False,
+                            'lifecycle': self._lifecycle()}
                 self.process = subprocess.Popen(session['launch_args'], cwd=session['directory'],
                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                session['build_pid'] = self.process.pid
                 session['stopped'] = False
                 self._phase(session, 'launched')
                 threading.Thread(target=self._collect, args=(self.process,), daemon=True).start()
-                self.timer = threading.Timer(900, self._expire, args=(session_id,))
-                self.timer.daemon = True
-                self.timer.start()
-            except Exception:
+                self._arm_deadline(session)
+            except Exception as exc:
                 # 启动失败仍保留副本与存档，允许读取日志后显式 stop_game 清理。
                 session['stopped'] = True
+                session['cleanup_failed'] = True
+                session['termination'] = {'reason': 'restart_failed', 'source': 'tool',
+                                          'requested_at': utc_time(), 'error_type': type(exc).__name__}
                 raise
-            return {**preview, 'state': 'building_or_starting', 'compiled': False}
+            return {**preview, 'state': 'building_or_starting', 'compiled': False,
+                    'lifecycle': self._lifecycle()}
 
     def _restart_prepare(self, session):
         acquired = False
@@ -1572,6 +1840,7 @@ class Runtime:
                 self.process = subprocess.Popen(session['launch_args'], cwd=session['directory'],
                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                session['build_pid'] = self.process.pid
                 self._phase(session, 'launched')
                 threading.Thread(target=self._collect, args=(self.process,), daemon=True).start()
         except InterruptedError:
@@ -1585,12 +1854,14 @@ class Runtime:
             if acquired:
                 self._hold_build(session)
 
-    def _expire(self, session_id):
+    def _expire(self, session_id, source='session_timeout', deadline=None):
         try:
-            result = self.stop(session_id, dry_run=False)
-            if not result['stopped']:
-                with self.guard:
-                    self.timer = threading.Timer(1, self._expire, args=(session_id,))
+            with self.stop_guard:
+                if deadline is not None and (not self.session or self.session.get('deadline') != deadline):
+                    return
+                result = self.stop(session_id, dry_run=False, _source=source)
+                if not result['stopped']:
+                    self.timer = threading.Timer(1, self._expire, args=(session_id, source, deadline))
                     self.timer.daemon = True
                     self.timer.start()
         except (ValueError, OSError, subprocess.SubprocessError):
@@ -1598,4 +1869,4 @@ class Runtime:
 
     def close(self):
         if self.session:
-            self._expire(self.session['id'])
+            self._expire(self.session['id'], 'service_shutdown')

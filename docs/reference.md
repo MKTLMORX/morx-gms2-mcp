@@ -6,7 +6,7 @@
 
 ## 工具清单
 
-共 71 个工具。先按工具名发现所需接口，再查看该接口的参数，避免把整套声明打印进上下文。公共流程由 `server_info.usage` 返回，初始化只保留入口提示。参数类型与默认值可由 MCP 客户端查询；以下说明常用流程和限制。
+共 76 个工具。先按工具名发现所需接口，再查看该接口的参数，避免把整套声明打印进上下文。公共流程由 `server_info.usage` 返回，初始化只保留入口提示。参数类型与默认值可由 MCP 客户端查询；以下说明常用流程和限制。
 
 | 工具 | 功能 |
 | --- | --- |
@@ -14,18 +14,19 @@
 | `inspect_project` | 资源、分组、引用、房间顺序和帧结构校验 |
 | `inspect_resource` | 资源描述及源文件哈希 |
 | `read_code` | 读取脚本或物体事件的 GML 及 SHA-256 |
-| `update_code` | 按哈希修改已有 GML，保留编码并走事务备份 |
+| `update_code` | 按哈希修改 GML，保留 BOM，可显式选择行尾并预览格式变化 |
 | `install_runtime_bridge` | 在启动房间安装可撤销的测试桥接 |
 | `inspect_runtime_snapshot` | 预览依赖副本的文件数、字节数、目录统计和配置哈希 |
 | `configure_runtime_snapshot` | 配置额外依赖、完整副本兼容模式与排除路径 |
-| `list_game_sessions` | 列出独立会话、构建/Runner PID 和准备进度 |
+| `list_game_sessions` | 默认列出会话摘要，可过滤历史或展开完整状态 |
 | `runtime_status` | 会话、构建进程和桥接就绪状态 |
 | `compile_game` | 只编译隔离副本，不启动游戏、不要求桥接 |
-| `restart_game` | 重新编译运行同一隔离副本，保留测试存档 |
+| `restart_game` | 重启同一快照并保留存档，direct 模式免编译 |
 | `run_game` | 构建并运行隔离 Windows VM 副本，需 `--allow-run` |
 | `stop_game` | 停止本服务创建的会话并清理副本/存档 |
 | `get_runtime_output` | 按游标读取构建和运行日志 |
 | `get_runtime_errors` | 读取未处理异常和桥接命令错误 |
+| `game_request_status` | 查询原请求状态和结果，不重放事件 |
 | `save_game_capture` | 导出预览 PNG 到项目固定目录，不覆盖已有文件 |
 | `capture_game` | 从游戏 DrawGUIEnd 获取 PNG 画面 |
 | `inspect_game` | 读取房间、窗口、GUI、实例变量或全局变量；数组和结构体受深度与数量限制 |
@@ -42,6 +43,9 @@
 | `save_game_test_report` | 保存 JSON、Markdown 和截图到固定本地目录，拒绝覆盖 |
 | `inspect_game_audio` | 指定声音、关联组加载状态及登记句柄的播放状态 |
 | `inspect_display_settings` | Windows 选项及指定房间/首房间的尺寸、相机和视口 |
+| `inspect_windows_export` | Windows 导出元信息、配置/图标哈希与配置覆盖 |
+| `configure_windows_export` | 配置 EXE 名、版本、Unicode 元信息及项目内图标引用 |
+| `import_windows_icon` | 导入 ICO 或从 PNG 生成多尺寸 ICO，图标与配置单事务 |
 | `configure_windows_display` | 显示名称、启动全屏、边框、大小调整许可等 Windows 选项 |
 | `configure_room_display` | 独立调整房间大小、一个相机及其视口 |
 | `remove_empty_group` | 项目哈希保护清理空分组及排序项，拒绝非空组 |
@@ -72,6 +76,7 @@
 | `configure_sound` | 按描述哈希配置已有声音，默认预览并支持事务撤销 |
 | `inspect_audio_groups` | 查询音频组、声音成员和哈希 |
 | `create_audio_group` | 按项目哈希创建普通音频组，默认预览 |
+| `configure_audio_export` | 批量配置声音/音频组导出目录并报告生效关系 |
 | `import_font` | 将 TTF/TTE/OTF/TTC 作为 IncludedFile 导入 datafiles/fonts |
 | `create_shader` | 创建 GLSL ES 顶点/片段源文件 |
 | `create_tileset` | 从精灵创建瓦片集 |
@@ -97,11 +102,35 @@
 
 预览不会改动游戏资源，但读取/预览可能创建项目锁文件。已有资源和事件拒绝覆盖；已有 GML 用 `read_code`/`update_code` 修改，按哈希拒绝过期写入。
 
+`update_code.line_ending` 为 `preserve`（默认）、`lf` 或 `crlf`。默认根据**当前文件**的行尾规范化输入，保留当前 UTF-8 BOM；文件已被外部工具改成 LF 时，须显式选 `crlf` 才能恢复。预览的 `formatting.before/after` 报告 BOM 及行尾，`mixed` 表示原文件混用行尾，`none` 表示无换行；正文和格式变更一并受哈希与事务恢复保护。
+
+修改代码或资源不会停止、清理或刷新已运行的隔离副本。需要验证最新源码时，新建快照运行；`restart_game` 仍使用原快照。
+
 每次写入都会在 `.codex/gms2-resource-backups/` 保存备份。用 `list_backups` 查询事务，再将 `transaction_id` 传给 `restore_backup`，预览或执行撤销。恢复须从最新未撤销事务开始；发现后续外部改动会拒绝覆盖。撤销新建操作会移除其新建文件。备份包含项目代码、素材和本机路径，不应上传到公共仓库。
+
+工具执行异常返回 `isError=true`，文本为可解析的 `{"ok":false,"error":{...}}`，同时提供 MCP 结构化内容；包括工具名、异常类型、错误代码、信息及诊断编号。运行请求错误还提供原会话/请求编号、是否执行结果未知，`runtime_status.last_request_error` 保留最近一次诊断。**先判断 `isError`，再尝试解析内容**：SDK 的参数或协议校验错误仍可能是普通文本，不应对所有返回直接 `JSON.parse`。错误不代表副作用已回滚，不能据此自动重放事件或输入。
 
 跨进程锁只协调本工具，IDE 不遵守此锁。单文件使用原子替换，多文件整体不是原子事务；请勿同时在 IDE 保存和执行 MCP 修改。失败会尝试恢复，有未完成恢复的事务时阻止新写入。
 
 ## 运行与观察
+
+### 长事件与请求结果
+
+耗时检查可以通过 `trigger_game_event(asynchronous=true)` 提交，立即返回原 `request_id`，然后只查询该请求：
+
+```json
+{"session_id":"<会话>","object_name":"obj_checks","event":"User","number":1,"asynchronous":true,"dry_run":false}
+```
+
+```json
+{"session_id":"<同一会话>","request_id":"<提交返回的请求编号>","wait_seconds":10}
+```
+
+第二项是 `game_request_status` 参数。`state=pending` 表示尚无完整回执；completed/failed 提供原 `result`，须继续判断 `result.ok`。同步等待超过默认15秒也会返回包含原请求编号的错误，可用相同查询确认迟到结果，**不重新触发**。查询不投递游戏动作，等待最多10秒，GameMaker 中的事件继续自然执行。
+
+每会话在服务内存保留最近16条请求记录，每条最多缓存256 KiB结果；超限时标记 `result_retained=false`，不伪造内容。停止时仍未确认的请求标记 `stopped_unknown`，不能断言从未执行；已确认的记录在清理后仍可查询。重启会话、历史淘汰或服务退出后记录移除。截图图像不缓存在此接口中。
+
+桥接心跳的 `activity` 报告最后确认的请求编号和 executing/completed 阶段。长 GML 事件会阻塞帧更新；超过10秒的 executing 标记仍是**过期观察**，不证明游戏当前健康或仍在执行。完成回执前会刷新心跳，刚完成事件后的 state/audio 读取允许最多2秒等待新心跳。这个等待只发生在近期已确认事件之后，不重发动作，也不延长900秒会话期限。升级后先按 `server_info.runtime_bridge` 显式同步桥接，不自动修改项目。
 
 运行能力通过 GameMaker 自带的 Igor 命令行构建 Windows VM 目标，并在用户目录中运行独立副本。它与资源写入开关分开，默认关闭。
 
@@ -140,9 +169,15 @@ install_runtime_bridge → run_game → runtime_status → capture_game / inspec
 
 调用超时或断开后先查 `runtime_status`，不要直接再启动。准备失败的会话也需 `stop_game` 清理。准备中停止会先请求取消；若线程尚未退出，返回 `stopped=false`、`cleaned=false`、`reason=preparation_in_progress`，稍后对同一会话再次停止。复制线程退出前不会删除它仍使用的目录，也不会允许另开会话。
 
-`compile_game` 只调用 Igor 的 Windows VM Compile，不启动游戏，也不要求测试桥接；仍需启用 `--allow-run` 和配置 Runtime。返回会话后查询 `runtime_status`：`build_status=succeeded` 和退出码 0 才表示编译成功，不能凭日志中的完成标记判断。`compile_error_count` 是已识别诊断行的数量，无法识别的失败仍会由退出码标记为 failed；它与桥接的 `error_count` 分开。结束后用 `stop_game` 清理副本。
+`compile_game` 只调用 Igor 的 Windows VM Compile，不启动游戏，也不要求测试桥接；仍需启用 `--allow-run` 和配置 Runtime。返回会话后查询 `runtime_status`：`build_status=succeeded` 和退出码 0 才表示编译成功，不能凭日志中的完成标记判断。`compile_error_count/build_diagnostics` 仅收集编译阶段诊断，`runtime_log_error_count/runtime_log_diagnostics` 收集 Runner 阶段日志中的错误行；后者不等于桥接捕获的 `error_count`。日志的每行带 `stage`。Igor 模式以 Runner 的 `-game` 启动命令作为阶段边界，direct 模式按受管进程切换；关键词诊断不替代构建退出码。结束后用 `stop_game` 清理副本。
 
-`restart_game` 先结束本次受管进程，再用同一隔离副本重新 Igor Run，保留该会话存档。它会重新编译副本，不复制源项目最新改动，也不接管外部 Runner；准备未完成或准备失败的会话不能重启。返回后重新等待桥接就绪。最终 `stop_game` 仍会清理副本和存档。
+`restart_game` 先结束本次受管进程，再启动同一隔离副本并保留存档。igor 模式重新编译，direct 模式校验本会话 `.win` 哈希并直接重启 Runner（`rebuilds_snapshot=false`）；产物缺失或改变时拒绝启动，保留目录供停止清理。它不复制源项目最新改动，也不接管外部 Runner；准备未完成或准备失败的会话不能重启。返回后重新等待桥接就绪。最终 `stop_game` 仍会清理副本和存档。
+
+每次启动最长 **900 秒，包含排队、准备和编译**，重启重新计时。`server_info.runtime_sessions` 和运行预览说明上限；实际启动后的 `lifecycle` 包含 `created_at`、`expires_at`（UTC）、`remaining_seconds` 与最后 60 秒的 `expires_soon` 提示。达到期限会自动停止并清理，长流程应在到期前导出证据。
+
+`stop_reason/stop_source` 与 `lifecycle.termination` 记录显式 `stop_game`、`restart_game`、`session_timeout` 或 `service_shutdown`，来源分别为 tool、timer、service。自然进程退出在 `lifecycle.exit` 中记录为 `runtime_exception`、`process_failed`、`process_exited` 或 `compile_completed`，来源为 process；没有证据时不推断是谁关闭了窗口。退出码 0 仍可能存在未处理 GML 异常，须同时检查 `last_runtime_error` 或 `get_runtime_errors`。
+
+停止清理前保存最后的桥接异常，随后 `runtime_status`、`get_runtime_errors` 和重复停止仍可查询。记录仅保留在服务内存中，重启同一会话、历史淘汰或服务退出后不再保留；重要证据仍须及时导出。清理操作的来源与此前自然退出原因分别记录；重启后用 `previous_termination/previous_exit` 查询上次启动的停止/退出摘要，只保留最近一组。
 
 `save_game_capture` 将与内嵌截图相同的预览 PNG 保存到绑定项目 `.codex/morx-captures/<filename>.png`。它需要 `--write` 和 `dry_run=false`，只接受安全文件名，不覆盖已有文件，不开放任意写入目录。
 
@@ -170,7 +205,11 @@ install_runtime_bridge → run_game → runtime_status → capture_game / inspec
 {"new_session":true,"dry_run":true}
 ```
 
-执行后保存每个返回的 `session_id`。`list_game_sessions` 列出状态；`runtime_status(session_id=...)` 定位目标，存在多个活动会话时省略目标会报错。日志、截图、输入、场景测试和停止始终使用明确会话编号；测试报告用唯一 `test_id` 路由。查不到可见游戏窗口时 Runner PID 可能为空，不能把构建 PID 当作游戏 PID。
+执行后保存每个返回的 `session_id`。`list_game_sessions` 默认返回摘要（状态、PID、错误计数、期限和停止来源），`include_history=false` 隐藏已清理历史；`summary=false` 才展开完整状态。快照明细、桥接文件和诊断优先用 `runtime_status(session_id=...)` 定位查询，存在多个活动会话时省略目标会报错。日志、截图、输入、场景测试和停止始终使用明确会话编号；测试报告用唯一 `test_id` 路由。Igor 模式查不到可见游戏窗口时 Runner PID 可能为空；direct 模式直接持有 Runner 进程，不能把构建 PID 当作游戏 PID。
+
+多端内存受限时可显式选择 `run_game(launch_mode="direct")`，后续客户端同时指定 `new_session=true`。它先用 Igor Compile 构建独立副本，等待编译器正常退出后，用配置 Runtime 的官方 `Runner.exe -game` 加载该会话产物。`build_pid/build_exit_code` 对应已结束的编译器，`runner_pid/exit_code` 对应游戏；预览的 `resource_cost` 说明常驻构建进程差异。此方式参考[官方 Runner 命令行](https://manual.gamemaker.io/lts/en/Settings/Command_Line_Parameters.htm)，不结束仍在运行的 Igor 来分离子进程。
+
+默认 `launch_mode="igor"` 保留 Igor Run 流程。direct 每端仍独立编译，保留所有输出伴随文件、独立桥接及存档，不跨会话共享编译包；每次重启只复用本会话的产物。两种模式都遵守同一停止、清理与 900 秒限制。工具不提供适用于所有项目的固定内存估算，接口上限不表示本机有足够内存启动对应数量的客户端。
 
 每个会话有独立项目副本、构建缓存、桥接回执和 GameMaker 沙箱存档。`restart_game` 排队重建原快照并保留本会话存档；`stop_game` 只清理目标会话。保存路径隔离不替游戏管理登录账号，也不隔离游戏自己访问的外部数据库或服务。默认消息输入不切前台；`physical` 与 `state` 模式仍受桌面焦点约束。
 
@@ -191,6 +230,8 @@ install_runtime_bridge → run_game → runtime_status → capture_game / inspec
 `run_game_test` 在**已就绪的受管会话**执行最多 32 步，先完整预览参数，实际执行立即返回 `test_id`。查询 `game_test_status`，状态为 running、passed、failed、timed_out、error 或 cancelled；`include_images=true` 可返回截图。测试期间该会话只允许状态/报告查询与 `stop_game`，该会话其他运行输入被拒绝，避免交叉操作。
 
 测试支持原动作序列的全部步骤，以及 `audio`、`assert` 和 `wait_until`。至少包含一个断言或条件等待；纯动作仍用 `run_game_sequence`。示例：
+
+工具描述给出断言形状，`server_info.game_test_example` 提供“读取全局变量并断言 → 截图”的最小例子及操作符列表。`observe` 自带只读查询，每个断言不依赖之前状态步骤的隐式结果；未知参数错误会列出错误键与允许键。
 
 ```json
 {
@@ -264,7 +305,7 @@ GUI 模式按整个客户区比例换算；项目若自行设置 GUI 偏移、�
 | 通信 | 通过存档目录中的 JSON 文件请求/应答，无 HTTP/TCP 监听；旧会话和旧请求 ID 会被拒绝 |
 | 画面 | `capture_game` 从游戏 `DrawGUIEnd` 保存 PNG，预览最长边界 1280×720；不抓取桌面 |
 | 日志 | 异步收集、有限环形缓冲，隐藏凭据相关行并脱敏本机路径 |
-| 生命周期 | 最多8个活动/待清理会话；每次启动最长15分钟（含排队）；停止只针对目标会话的 Igor 和子进程 |
+| 生命周期 | 最多8个活动/待清理会话；每次启动最长15分钟（含准备/编译）；只停止目标会话的受管进程及子进程 |
 | 清理 | 停止、过期或启动失败会尝试删除构建副本与存档目录；`stop_game` 的 `cleaned` 和逐目录 `cleanup` 返回实际结果 |
 
 若 `cleaned=false`，查看 `cleanup` 中的目标、原因和错误类型；解除文件占用后，对原 `session_id` 再次调用 `stop_game`。清理失败会保留原会话及目录归属，占用会话名额；默认启动仍拒绝，显式 new_session=true 可新建其他会话。`restart_game` 内部保留副本和存档不属于清理失败。
@@ -283,6 +324,44 @@ GUI 模式按整个客户区比例换算；项目若自行设置 GUI 偏移、�
 - 结构校验不等于编译成功；以 Igor 日志和实际游戏画面为准。
 
 ## 资源编辑
+
+### Windows 导出信息与图标
+
+先调用 `inspect_windows_export`，读取 `settings`、Windows 配置 `sha256`、配置覆盖及图标信息，再预览或执行 `configure_windows_export`。这组工具与窗口显示设置独立，限已有 GMWindowsOptions v2；配置缺失不自动创建，非空 ConfigValues 覆盖拒绝写入。
+
+```json
+{"expected_sha256":"<查询返回的配置哈希>","executable_name":"MyGame.exe","display_name":"我的游戏","version":"1.2.3.0","product":"我的游戏","description":"游戏描述","company":"","copyright":"","dry_run":true}
+```
+
+省略/null表示不改；公司、版权等文本可用空串清除。显示名称、EXE名称和版本不能为空；EXE名称不含目录且须为合法 `.exe` 文件名，版本为四段0～65535整数。元信息支持Unicode，不改写GML中的展示版本，也不改变未提供的窗口选项。
+
+`import_windows_icon` 复制有效ICO，或将PNG等比居中生成16/24/32/48/64/128/256七档ICO；`trim_transparency` 控制是否裁透明空白，`padding` 为256画布上的0～96像素留边。PNG最长边4096，输入文件最多16 MiB；ICO逐项校验目录、字节范围、尺寸与完整图像。原始文件不改写，不重绘或拉伸主体。ICO原样导入，PNG变换参数对ICO不适用。
+
+```json
+{"source_path":"D:/Assets/app-icon.png","expected_windows_sha256":"<Windows配置哈希>","destination":"options/windows/icons/mygame.ico","trim_transparency":true,"padding":16,"dry_run":true}
+```
+
+目标只允许项目内 `options/windows/icons/*.ico`。预览返回源哈希、目标哈希、尺寸、裁剪/留边策略及待改文件；覆盖已有目标须提供 `expected_icon_sha256`，可用 `expected_source_sha256` 固定预览输入。图标和Windows配置同一事务，失败回滚、可原字节恢复；重复相同配置无变更。导出配置编辑沿用BOM、行尾和原生尾逗号风格，保留未知字段值，不承诺保留空白布局。配置保存为原生 `${options_dir}` 引用，查询同时给出解析后的项目相对路径。重新引用已有项目内图标也可用 `configure_windows_export.icon`。
+
+图标及版本信息以最终 Windows PackageZip/正式导出产物为准，普通运行截图不能验证EXE图标。[官方 Windows 选项](https://manual.gamemaker.io/lts/en/Settings/Game_Options/Windows.htm)也区分最终EXE图标和运行测试。工具不自动更改现有发行目录，不把配置读回等同于最终包、播放或IDE验收。
+
+### 声音与音频组导出目录
+
+`inspect_sound` 的 `settings.export_directory` 对应声音的 `exportDir`，同时报告 `audio_group_export_directory`、`audio_group_directory_applies`、`effective_export_directory` 和来源。`effective_export_target` 为 Windows VM；存在配置覆盖时生效目录为null，不推断跨配置结果。`configure_sound(export_directory=...)` 可单独设置目录，null保留、空串回根目录，不更改源音频或其他压缩/音量参数。
+
+Windows 中，流式声音使用自身目录；非流式自定义组按组目录导出组文件（空串为包根目录）；默认组非流式声音嵌入主游戏数据，默认组没有独立导出目录。默认组只允许清空遗留目录值，不允许配置一个会被忽略的非空目录。HTML5语义不同，不用这份Windows生效结果推断其他目标。参见[官方音频组说明](https://manual.gamemaker.io/lts/en/Settings/Audio_Groups.htm)。
+
+`inspect_audio_groups` 返回各组的目录、是否启用独立目录、覆盖状态及组定义哈希。批量操作使用 `configure_audio_export`，声音哈希来自 `inspect_sound`，组定义哈希与项目哈希来自组查询：
+
+```json
+{"sounds":[{"name":"snd_music_a","expected_sha256":"<声音A哈希>","export_directory":"audio"},{"name":"snd_music_b","expected_sha256":"<声音B哈希>","export_directory":"audio"}],"dry_run":true}
+```
+
+```json
+{"audio_groups":[{"name":"audio_effects","expected_sha256":"<组定义哈希>","export_directory":"audio/effects"}],"expected_project_sha256":"<项目哈希>","dry_run":true}
+```
+
+两种目标可在一个调用内组合，总数1～128。全部目标哈希和配置校验通过后单事务写入，任一冲突整批不写；预览返回各目标前后设置和修改文件。目录统一为 `/` 分隔，拒绝绝对路径、盘符、UNC、目录穿越及非法Windows目录名。不移动源素材或旧导出文件，不改资源树分组，尤其不为整理目录把流式音乐改为非流式。新目录要重新构建才生效，并用资源句柄实际播放验证。
 
 瓦片查询、编辑和结构检查支持未压缩数组及 `TileDataFormat=1` 压缩数据，写回保持原编码类型。单层最多解码 4194304 格，单次查询或修改最多 10000 格；损坏编码、未知格式及超限数据会拒绝处理。
 

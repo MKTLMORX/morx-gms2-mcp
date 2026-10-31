@@ -1,6 +1,7 @@
 """GMSound v2 的限定设置；不转码原音频，不代替运行期音频组加载。"""
 from .animation import number
 from .display import boolean, integer
+import re
 
 COMPRESSIONS = {'uncompressed': 0, 'compressed': 1, 'decompress_on_load': 2, 'streamed': 3}
 CHANNEL_FORMATS = {'mono': 0, 'stereo': 1, '3d': 2}
@@ -14,8 +15,45 @@ def enum_value(value, label, choices):
     return choices[value]
 
 
+def export_directory(value):
+    if not isinstance(value, str) or len(value) > 240 or value.startswith(('\\', '/')):
+        raise ValueError('导出目录须为游戏包内的相对目录；空字符串表示根目录')
+    value = value.replace('\\', '/')
+    if not value:
+        return ''
+    parts = [part for part in value.split('/') if part]
+    if not parts or any(part in ('.', '..') or part.endswith((' ', '.'))
+            or re.search(r'[<>:"|?*\x00-\x1f\x7f]', part)
+            or re.match(r'(?i)^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)', part) for part in parts):
+        raise ValueError('导出目录不接受绝对路径、盘符、目录穿越或非法 Windows 目录名')
+    value.encode('utf-8')
+    return '/'.join(parts)
+
+
+def group_directory(meta, name):
+    rows = [row for row in meta.get('AudioGroups', []) if row.get('name') == name]
+    if len(rows) != 1:
+        raise ValueError('音频组未唯一存在：' + name)
+    row = rows[0]
+    return export_directory(row.get('exportDir', '')), bool(row.get('ConfigValues') or meta.get('ConfigValues'))
+
+
+def export_effective(data, meta):
+    group = data['audioGroupId']['name']
+    directory, overrides = group_directory(meta, group)
+    applies = data['compression'] != 3 and group != 'audiogroup_default'
+    source = 'sound' if data['compression'] == 3 else 'audio_group' if applies else 'main_game_data'
+    effective = directory if applies else export_directory(data.get('exportDir', '')) if source == 'sound' else ''
+    unknown = bool(overrides or data.get('ConfigValues'))
+    return {'audio_group_export_directory': directory, 'audio_group_configuration_overrides': overrides,
+            'audio_group_directory_applies': applies, 'effective_export_target': 'Windows VM',
+            'effective_export_directory': None if unknown else effective,
+            'export_directory_source': 'configuration_override' if unknown else source}
+
+
 def updates(volume=None, compression=None, preload=None, compression_quality=None,
-            conversion_mode=None, sample_rate=None, channel_format=None, bit_depth=None):
+            conversion_mode=None, sample_rate=None, channel_format=None, bit_depth=None,
+            export_directory_value=None):
     result = {}
     if volume is not None:
         number(volume, '音量')
@@ -41,6 +79,8 @@ def updates(volume=None, compression=None, preload=None, compression_quality=Non
         if type(bit_depth) is not int or bit_depth not in (8, 16):
             raise ValueError('bit_depth 须为 8 或 16')
         result['bitDepth'] = (8, 16).index(bit_depth)
+    if export_directory_value is not None:
+        result['exportDir'] = export_directory(export_directory_value)
     return result
 
 
@@ -69,7 +109,8 @@ def settings(data):
                 'conversion_mode': next(k for k, v in CONVERSIONS.items() if v == data['conversionMode']),
                 'sample_rate': data['sampleRate'],
                 'channel_format': next(k for k, v in CHANNEL_FORMATS.items() if v == data['channelFormat']),
-                'bit_depth': (8, 16)[data['bitDepth']], 'audio_group': group['name']}
+                'bit_depth': (8, 16)[data['bitDepth']], 'audio_group': group['name'],
+                'export_directory': export_directory(data.get('exportDir', ''))}
     except (KeyError, TypeError, AttributeError, IndexError) as exc:
         raise ValueError('声音设置结构不完整，拒绝修改') from exc
 
@@ -83,3 +124,71 @@ def notes(data):
     if data.get('soundFile', '').lower().endswith('.ogg') and data['conversionMode'] == 0:
         result.append('OGG automatic 可直接复制源文件；若需保证质量、采样率或声道转换，请显式选择 conversion_mode=required。')
     return result
+
+
+def configure_export(project, sounds=None, audio_groups=None, expected_project_sha256=None, dry_run=True):
+    """批量修改目录，所有目标校验完毕后才写入，组定义同时受项目哈希保护。"""
+    from .resources import Edit, name_check
+    from .exports import expected
+    from .storage import digest, encode
+    sounds, audio_groups = [] if sounds is None else sounds, [] if audio_groups is None else audio_groups
+    if (not isinstance(sounds, list) or not isinstance(audio_groups, list)
+            or not 1 <= len(sounds) + len(audio_groups) <= 128):
+        raise ValueError('批量目录配置须包含1～128个声音/音频组')
+    for rows in (sounds, audio_groups):
+        seen = set()
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != {'name', 'expected_sha256', 'export_directory'}:
+                raise ValueError('每个目标须提供 name、expected_sha256、export_directory（null保留）')
+            name_check(row['name'])
+            if row['name'].casefold() in seen:
+                raise ValueError('批量目标重复')
+            seen.add(row['name'].casefold())
+            if row['export_directory'] is not None:
+                export_directory(row['export_directory'])
+    with project.lock:
+        edit = Edit(project)
+        meta = edit.load(project.yyp.name)
+        if meta.get('ConfigValues'):
+            raise ValueError('项目含配置覆盖，暂不修改音频导出目录')
+        project.inspect_audio_groups()  # 校验默认组、组重名及现有声音引用。
+        definitions = {row['name']: row for row in meta.get('AudioGroups', [])}
+        summary = []
+        if audio_groups:
+            expected(edit.raw(project.yyp.name), expected_project_sha256, '项目')
+        changed_groups = False
+        for row in audio_groups:
+            data = definitions.get(row['name'])
+            if (not data or data.get('$GMAudioGroup') != 'v1' or data.get('resourceType') != 'GMAudioGroup'
+                    or data.get('targets') != -1 or data.get('ConfigValues')):
+                raise ValueError('仅配置已有全平台 GMAudioGroup v1，不能含配置覆盖')
+            expected(encode(data), row['expected_sha256'], '音频组 ' + row['name'])
+            before = export_directory(data.get('exportDir', ''))
+            if row['export_directory'] is not None:
+                after = export_directory(row['export_directory'])
+                if row['name'] == 'audiogroup_default' and after:
+                    raise ValueError('默认音频组包含于主游戏数据，没有独立导出目录；这里只允许清空')
+                if data.get('exportDir') != after:
+                    data['exportDir'] = after
+                    changed_groups = True
+            summary.append({'kind': 'audio_group', 'name': row['name'], 'before': before,
+                            'after': export_directory(data.get('exportDir', ''))})
+        for row in sounds:
+            ref, data = project._sound(edit, row['name'])
+            project._sound_group(edit, data)
+            expected(edit.raw(ref['path']), row['expected_sha256'], '声音 ' + row['name'])
+            if data.get('ConfigValues') or group_directory(meta, data['audioGroupId']['name'])[1]:
+                raise ValueError('声音或音频组含配置覆盖，暂不修改导出目录')
+            before = settings(data)['export_directory']
+            if row['export_directory'] is not None:
+                after = export_directory(row['export_directory'])
+                if data.get('exportDir') != after:
+                    data['exportDir'] = after
+                    edit.save(ref['path'], data, preserve_trailing=True)
+            summary.append({'kind': 'sound', 'name': row['name'], 'before': before,
+                'after': settings(data)['export_directory'], **export_effective(data, meta)})
+        if changed_groups:
+            edit.save(project.yyp.name, meta, preserve_trailing=True)
+        return {**edit.commit(dry_run), 'targets': summary, 'compiled': False,
+                'notes': ['Windows：自定义组的非流式音频使用组目录（空串为根）；流式声音使用声音目录；默认组非流式音频嵌入主包。',
+                          '不移动源文件、不修改压缩/音量等参数，最终路径须通过导出检查']}

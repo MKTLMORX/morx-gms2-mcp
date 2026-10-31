@@ -49,7 +49,7 @@ class ProtocolTests(ProjectFixture):
                     self.assertEqual(init.serverInfo.name, 'morx-gms2-mcp')
                     self.assertLessEqual(len(init.instructions or ''), 80)
                     tools = (await session.list_tools()).tools
-                    self.assertEqual(len(tools), 71)
+                    self.assertEqual(len(tools), 76)
                     self.assertTrue({'inspect_sprite', 'configure_sprite', 'set_sprite_animation',
                                      'set_game_variables', 'spawn_game_instance',
                                      'destroy_game_instance', 'remove_object_event',
@@ -71,7 +71,27 @@ class ProtocolTests(ProjectFixture):
                         self.assertFalse(waiting.done(), 'stdio 被同步等待阻塞，无法并发响应')
                     finally:
                         await waiting
-                    self.assertEqual((await call('list_game_sessions', {}))['sessions'], [])
+                    listed = await call('list_game_sessions', {'include_history': False})
+                    self.assertEqual(listed['sessions'], [])
+                    self.assertTrue(listed['summary'])
+                    failed = await session.call_tool('game_request_status', arguments={'session_id':'missing','request_id':'missing'})
+                    self.assertTrue(failed.isError)
+                    failure = json.loads(failed.content[0].text)
+                    self.assertEqual(failure['error']['tool'], 'game_request_status')
+                    export_info = await call('inspect_windows_export', {})
+                    export_args = {'expected_sha256': export_info['sha256'], 'product': '测试产品', 'version': '1.2.3.4', 'company': ''}
+                    self.assertTrue((await call('configure_windows_export', export_args))['dry_run'])
+                    icon_args = {'source_path': str(png), 'expected_windows_sha256': export_info['sha256']}
+                    self.assertEqual((await call('import_windows_icon', icon_args))['sizes'], [16,24,32,48,64,128,256])
+                    sound_export = await call('inspect_sound', {'name':'snd_protocol'})
+                    audio_args = {'sounds':[{'name':'snd_protocol','expected_sha256':sound_export['sha256'],'export_directory':'audio'}]}
+                    self.assertTrue((await call('configure_audio_export', audio_args))['dry_run'])
+                    for tool, arguments in [('configure_windows_export', export_args), ('import_windows_icon', icon_args), ('configure_audio_export', audio_args)]:
+                        if writable:
+                            written = await call(tool, {**arguments, 'dry_run':False})
+                            await call('restore_backup', {'transaction_id':written['transaction'], 'dry_run':False})
+                        else:
+                            await call(tool, {**arguments, 'dry_run':False}, True)
                     snapshot = await call('inspect_runtime_snapshot', {'limit': 0})
                     self.assertGreater(snapshot['file_count'], 0)
                     self.assertEqual(snapshot['files'], [])
@@ -138,8 +158,11 @@ class ProtocolTests(ProjectFixture):
                     if writable:
                         result = await call('create_script', {'name': 'scr_protocol', 'code': '// 测试', 'dry_run': False})
                         code = await call('read_code', {'name': 'scr_protocol'})
-                        edit = {'name': 'scr_protocol', 'code': '// 修改', 'expected_sha256': code['sha256']}
-                        self.assertTrue((await call('update_code', edit))['dry_run'])
+                        edit = {'name': 'scr_protocol', 'code': '// 修改\n',
+                                'expected_sha256': code['sha256'], 'line_ending': 'crlf'}
+                        format_preview = await call('update_code', edit)
+                        self.assertTrue(format_preview['dry_run'])
+                        self.assertEqual(format_preview['formatting']['after']['line_ending'], 'crlf')
                         changed = await call('update_code', {**edit, 'dry_run': False})
                         await call('update_code', {**edit, 'dry_run': False}, True)
                         await call('restore_backup', {'transaction_id': changed['transaction'], 'dry_run': False})

@@ -157,10 +157,20 @@ class Edit:
             return default
         return parse_yy(raw.decode('utf-8-sig'))
 
-    def save(self, rel, data):
+    def save(self, rel, data, preserve_trailing=False):
         original = self.raw(rel)
         raw = encode(data)
         if original:
+            if preserve_trailing and re.search(rb',\s*}\s*$', original):
+                # 沿用 GameMaker 的尾逗号风格；编码器已将字符串内换行转义，
+                # 独占行的闭合符只可能属于 JSON 容器，不会改动字符串值。
+                lines = raw.splitlines()
+                for index, line in enumerate(lines):
+                    if index and line.lstrip()[:1] in (b'}', b']'):
+                        previous = lines[index-1].rstrip()
+                        if not previous.endswith((b'{', b'[', b',')):
+                            lines[index-1] = previous + b','
+                raw = b'\n'.join(lines) + b'\n'
             if b'\r\n' in original:
                 raw = raw.replace(b'\n', b'\r\n')
             if original.startswith(b'\xef\xbb\xbf'):
@@ -337,7 +347,9 @@ class Project(Storage):
                     'sha256': digest(raw), 'code': raw.decode('utf-8-sig')}
 
     def update_code(self, name, code, expected_sha256, event=None, number=0,
-                    collision_object=None, dry_run=True):
+                    collision_object=None, dry_run=True, line_ending='preserve'):
+        if line_ending not in ('preserve', 'lf', 'crlf'):
+            raise ValueError('line_ending 须为 preserve、lf 或 crlf')
         if not isinstance(code, str) or '\0' in code or len(code.encode('utf-8')) > 2 * 1024 * 1024:
             raise ValueError('GML 须为不含 NUL、最多 2 MiB 的 UTF-8 文本')
         if not isinstance(expected_sha256, str) or not re.fullmatch('[a-f0-9]{64}', expected_sha256):
@@ -352,10 +364,19 @@ class Project(Storage):
             if raw is None or digest(raw) != expected_sha256:
                 raise ValueError('代码已被修改或不存在，请重新 read_code 并预览')
             normalized = code.replace('\r\n', '\n').replace('\r', '\n')
-            if b'\r\n' in raw:
+            if line_ending == 'crlf' or (line_ending == 'preserve' and b'\r\n' in raw):
                 normalized = normalized.replace('\n', '\r\n')
             edit.changes[path] = (b'\xef\xbb\xbf' if raw.startswith(b'\xef\xbb\xbf') else b'') + normalized.encode('utf-8')
             result = edit.commit(dry_run)
+            def formatting(data):
+                crlf = data.count(b'\r\n')
+                lf = data.count(b'\n') - crlf
+                cr = data.count(b'\r') - crlf
+                endings = [name for name, count in (('crlf', crlf), ('lf', lf), ('cr', cr)) if count]
+                return {'bom': data.startswith(b'\xef\xbb\xbf'),
+                        'line_ending': endings[0] if len(endings) == 1 else 'mixed' if endings else 'none'}
+            result['formatting'] = {'before': formatting(raw), 'after': formatting(edit.changes[path]),
+                                    'requested_line_ending': line_ending}
             result['compiled'] = False
             return result
 
@@ -1368,6 +1389,7 @@ class Project(Storage):
         raw = edit.raw(relative)
         return {'name': data['name'], 'path': ref['path'], 'sha256': digest(edit.raw(ref['path'])),
                 'settings': audio.settings(data), 'duration': data.get('duration'),
+                **audio.export_effective(data, edit.load(self.yyp.name)),
                 'source_file': {'path': relative, 'exists': raw is not None,
                                 'sha256': digest(raw), 'bytes': len(raw) if raw is not None else None,
                                 'format': Path(filename).suffix.lower().lstrip('.')},
@@ -1405,7 +1427,11 @@ class Project(Storage):
                     'sha256': digest(edit.raw(ref['path'])), 'streamed': settings['streamed'],
                     'configuration_overrides': bool(data.get('ConfigValues'))})
             return {'project_sha256': digest(edit.raw(self.yyp.name)),
-                    'audio_groups': [{'name': r['name'], 'definition': r, 'members': members[r['name']]}
+                    'audio_groups': [{'name': r['name'], 'definition': r, 'sha256': digest(encode(r)),
+                                     'export_directory': audio.export_directory(r.get('exportDir', '')),
+                                     'export_directory_enabled': r['name'] != 'audiogroup_default',
+                                     'configuration_overrides': bool(r.get('ConfigValues') or meta.get('ConfigValues')),
+                                     'members': members[r['name']]}
                                      for r in rows]}
 
     def create_audio_group(self, name, expected_project_sha256, dry_run=True):
@@ -1432,9 +1458,10 @@ class Project(Storage):
 
     def configure_sound(self, name, expected_sha256, volume=None, compression=None, preload=None,
                         compression_quality=None, conversion_mode=None, audio_group=None,
-                        sample_rate=None, channel_format=None, bit_depth=None, dry_run=True):
+                        sample_rate=None, channel_format=None, bit_depth=None, dry_run=True,
+                        export_directory=None):
         changes = audio.updates(volume, compression, preload, compression_quality,
-                                conversion_mode, sample_rate, channel_format, bit_depth)
+                                conversion_mode, sample_rate, channel_format, bit_depth, export_directory)
         if not isinstance(expected_sha256, str) or not re.fullmatch('[a-f0-9]{64}', expected_sha256):
             raise ValueError('必须提供 inspect_sound 返回的 expected_sha256')
         if audio_group is not None:
@@ -1452,10 +1479,12 @@ class Project(Storage):
             data.update(changes)
             self._sound_group(edit, data)
             summary = self._sound_summary(edit, ref, data)
+            if export_directory is not None and summary['audio_group_configuration_overrides']:
+                raise ValueError('音频组含配置覆盖，暂不修改导出目录')
             if not summary['source_file']['exists']:
                 raise ValueError('声音缺少源文件，请先修复资源')
             if encode(data) != original:
-                edit.save(ref['path'], data)
+                edit.save(ref['path'], data, preserve_trailing=export_directory is not None)
             result = edit.commit(dry_run)
             result.update(before=before, settings=summary['settings'], notes=summary['notes'], compiled=False)
             return result

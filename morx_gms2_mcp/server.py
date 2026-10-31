@@ -2,23 +2,34 @@
 from pathlib import Path
 from contextlib import asynccontextmanager
 from functools import wraps
+from typing import Literal
 import asyncio
 import json
+from uuid import uuid4
 from mcp.server.fastmcp import FastMCP, Image
-from mcp.types import TextContent
+from mcp.types import TextContent, CallToolResult
 from mcp.types import ToolAnnotations
 from . import __version__
 from .resources import Project, EVENTS
-from .runtime import RuntimeOptions
+from .runtime import RuntimeOptions, MAX_SESSION_SECONDS
 from .sessions import RuntimePool
-from . import snapshots
+from . import snapshots, exports, audio
 
 
 def background(function):
     """同步运行/磁盘操作不能阻塞 MCP 事件循环；保留原签名供 schema 生成。"""
     @wraps(function)
     async def invoke(*args, **kwargs):
-        return await asyncio.to_thread(function, *args, **kwargs)
+        try:
+            return await asyncio.to_thread(function, *args, **kwargs)
+        except Exception as exc:
+            detail = getattr(exc, 'details', None)
+            if not isinstance(detail, dict):
+                detail = {'code': 'invalid_request' if isinstance(exc, ValueError) else 'tool_error',
+                          'message': str(exc)[:4096], 'diagnostic_id': uuid4().hex}
+            payload = {'ok': False, 'error': {**detail, 'tool': function.__name__, 'type': type(exc).__name__}}
+            return CallToolResult(isError=True, content=[TextContent(type='text',
+                text=json.dumps(payload, ensure_ascii=False))], structuredContent=payload)
     return invoke
 
 
@@ -53,7 +64,11 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
                           'tileset', 'tile layer'],
             'sprite_editing': ['查询普通位图动画', '播放速度及单位', '自定义原点', '帧重排', '逐帧时长'],
             'audio_settings': ['查询声音及源文件哈希', '音量', '四种压缩/流式模式', '预加载标志',
-                               '压缩质量', 'OGG 转换策略', '采样率/声道/位深', '查询/创建音频组和声音分配'],
+                               '压缩质量', 'OGG 转换策略', '采样率/声道/位深', '查询/创建音频组和声音分配',
+                               '声音与音频组导出目录、覆盖关系和批量事务'],
+            'windows_export': {'inspect': 'inspect_windows_export', 'configure': 'configure_windows_export',
+                               'icon_import': 'import_windows_icon', 'ico_sizes': exports.ICON_SIZES,
+                               'package_verified': True, 'ide_verified': False},
             'scene_testing': ['结构化断言', '有截止时间的条件等待', '窗口消息鼠标步骤', '异步测试状态',
                               '失败状态/截图/日志', '本地 JSON/Markdown 证据报告'],
             'audio_diagnostics': ['指定声音存在/播放/暂停', '关联音频组加载状态',
@@ -78,7 +93,19 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
                          '日志', '数据事件触发', '按键测试'],
             'runtime_enabled': runtime.options.enabled,
             'runtime_sessions': {'max_active': 8, 'build_concurrency': 1, 'explicit_new_session': True,
-                                 'runtime_verified_clients': 2},
+                                 'runtime_verified_clients': 2, 'max_session_seconds': MAX_SESSION_SECONDS,
+                                 'deadline_includes_preparation': True, 'launch_modes': ['igor', 'direct'],
+                                 'direct_runtime_verified': True},
+            'runtime_requests': {'async_event': True, 'status_tool': 'game_request_status',
+                                 'history_per_session': 16, 'result_max_bytes': 262144,
+                                 'automatic_replay': False, 'runtime_verified': True},
+            'tool_errors': '工具执行异常返回 isError=true 和 JSON error；SDK参数/协议错误仍可能为文本，先判断isError再解析。',
+            'game_test_example': {'steps': [
+                {'action': 'assert', 'observe': {'action': 'state', 'scope': 'globals', 'variables': ['score']},
+                 'path': ['globals', 'score'], 'operator': 'gte', 'expected': 0},
+                {'action': 'capture'}],
+                'note': '将 score 替换为实际变量；path 相对 observe 返回的 data，字段名用字符串、数组索引用整数。',
+                'operators': ['eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'exists']},
             'runtime_snapshot': {'default_mode': 'dependencies', 'extra_dependencies': True,
                                  'preview_tool': 'inspect_runtime_snapshot', 'compile_verified': True},
             'networking_event': {'name': 'AsyncNetworking', 'aliases': ['Networking'],
@@ -155,6 +182,17 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
         """列出音频组、声音成员及哈希；运行期是否已加载须用 inspect_game_audio 查询。"""
         return project.inspect_audio_groups()
 
+    @mcp.tool(annotations=change)
+    @background
+    def configure_audio_export(sounds: list[dict] | None = None, audio_groups: list[dict] | None = None,
+                               expected_project_sha256: str | None = None, dry_run: bool = True) -> dict:
+        """批量配置1～128个声音/音频组导出目录，单事务；不改源文件或压缩参数。
+        每项为 {name,expected_sha256,export_directory}；目录null保留、空串回根目录。
+        声音哈希来自inspect_sound，组定义及项目哈希来自inspect_audio_groups；修改组须传项目哈希。
+        Windows非流式自定义组使用组目录，流式使用声音目录；默认组无独立目录。任一冲突整批拒绝。
+        """
+        return audio.configure_export(project, sounds, audio_groups, expected_project_sha256, dry_run)
+
     @mcp.tool(annotations=add)
     @background
     def create_audio_group(name: str, expected_project_sha256: str, dry_run: bool = True) -> dict:
@@ -177,6 +215,8 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
                       max_seconds: int = 120, dry_run: bool = True) -> dict:
         """在已就绪的隔离会话执行声明式场景测试，异步返回 test_id。默认只预览全部步骤。
         支持序列动作、message 鼠标、audio、assert/wait_until；只比较响应字段，不求值表达式。
+        断言用 observe={action:"state",...}、path=[字段名,数组索引,...]、operator="eq"、expected=比较值。
+        path 相对观察响应的 data；完整最小例子见 server_info.game_test_example。
         实际运行时禁止交叉请求；查询 game_test_status，取消用 stop_game；完成后可导出证据。
         """
         return runtime.test_start(session_id, steps, stop_on_failure, max_seconds, dry_run)
@@ -222,10 +262,13 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
     @mcp.tool(annotations=change)
     @background
     def update_code(name: str, code: str, expected_sha256: str, event: str | None = None,
-                    number: int = 0, collision_object: str | None = None, dry_run: bool = True) -> dict:
-        """按 read_code 返回的哈希修改已有 GML，保留编码及备份。拒绝过期写入；不代表已编译。"""
+                    number: int = 0, collision_object: str | None = None, dry_run: bool = True,
+                    line_ending: Literal['preserve', 'lf', 'crlf'] = 'preserve') -> dict:
+        """按哈希修改已有 GML，保留 BOM/备份；line_ending=preserve/lf/crlf，预览报告格式变化。
+        修改源文件不会停止或刷新已运行的隔离会话；新源码须新建运行验证。
+        """
         return project.update_code(name, code, expected_sha256, event, number,
-                                   collision_object, dry_run)
+                                   collision_object, dry_run, line_ending)
 
     @mcp.tool(annotations=add)
     @background
@@ -256,11 +299,11 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
 
     @mcp.tool(annotations=read)
     @background
-    def list_game_sessions() -> dict:
-        """列出本服务的独立会话、构建/Runner PID与准备进度；最多8个活动会话、32条历史。
-        多会话时runtime_status必须指定session_id，截图、输入、日志、停止也始终明确目标。
+    def list_game_sessions(include_history: bool = True, summary: bool = True) -> dict:
+        """默认返回会话摘要；include_history=false 隐藏已清理历史，summary=false 返回完整状态。
+        完整诊断优先用 runtime_status(session_id=...)；最多8个活动会话、32条历史。
         """
-        return runtime.listing()
+        return runtime.listing(include_history, summary)
 
     @mcp.tool(annotations=read)
     @background
@@ -272,18 +315,23 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
         retry_recoveries 是已恢复次数，pending_writes/stalled_writes 表示仍待写入/持续超过 10 秒。
         files 给出文件名、持续时间及最近重试/恢复，sample_age_seconds 表示诊断采样年龄。
         completed_temporary_file 表示完整回执已恢复，不能当成截图或输入失败，不自动重复命令。
+        lifecycle 给出 UTC 截止时间/剩余秒数与停止来源；last_runtime_error 在清理后仍可查询至服务退出。
+        compile_error_count 仅计编译阶段；runtime_log_error_count 是运行日志诊断，与桥接 error_count 分开。
         """
         return runtime.status(wait_seconds, session_id)
 
     @mcp.tool(annotations=change)
     @background
-    def run_game(dry_run: bool = True, new_session: bool = False) -> dict:
+    def run_game(dry_run: bool = True, new_session: bool = False,
+                 launch_mode: Literal['igor', 'direct'] = 'igor') -> dict:
         """构建并运行绑定项目的隔离 Windows VM 副本和存档，需 --allow-run 及本机 Runtime 配置。
         实际执行先返回 preparing 会话，后台检查项目、复制再启动；准备失败也保留会话供查询与清理。
         预览仍同步检查项目。查询 runtime_status/get_runtime_output 确认真实结果，不能把启动进程当作编译成功。
         再次运行前先 stop_game，或显式 new_session=true；最多8个会话，准备/构建排队；构建副本和存档位于用户目录，停止后由服务清理。
+        launch_mode=direct 先 Compile 后直接启动官方 Runner，Igor 不陪同运行；默认 igor 保持原流程。
+        每次启动最长900秒（含排队/编译），lifecycle 提供截止时间；到期自动停止并清理。
         """
-        return runtime.run(dry_run, new_session=new_session)
+        return runtime.run(dry_run, new_session=new_session, launch_mode=launch_mode)
 
     @mcp.tool(annotations=change)
     @background
@@ -297,8 +345,8 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
     @mcp.tool(annotations=change)
     @background
     def restart_game(session_id: str, dry_run: bool = True) -> dict:
-        """结束受管进程后，用同一隔离副本重新 Igor Run，保留本次测试存档。
-        会重新编译该副本，不复制源项目最新修改；返回后等待 bridge_ready。
+        """结束受管进程后，重启同一隔离快照并保留测试存档；不复制源项目最新修改。
+        igor 模式重新编译；direct 校验并复用本会话产物，免编译启动 Runner；返回后等待 bridge_ready。
         最终 stop_game 仍会清理副本和存档。不接管外部 Runner 或 IDE。
         """
         return runtime.restart(session_id, dry_run)
@@ -322,9 +370,18 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
     @background
     def get_runtime_errors(session_id: str, after: int = 0, limit: int = 20) -> dict:
         """读取游戏桥接记录的未处理异常和桥接命令错误，按 index 游标分页；最多保留 20 条。
-        异常发生在游戏进程内，可能不会出现在 Igor 日志中；停止会话前先读取，否则会随副本清理。
+        异常可能不会出现在 Igor 日志中；清理后在内存保留最后记录，服务退出或重启该会话后移除。
         """
         return runtime.errors(session_id, after, limit)
+
+    @mcp.tool(annotations=read)
+    @background
+    def game_request_status(session_id: str, request_id: str, wait_seconds: int = 0) -> dict:
+        """只查询原请求，最多等10秒，不发送或重放动作；用于异步事件及超时后回执确认。
+        每会话保留16条记录；completed/failed包含原result，pending仍未知，stopped_unknown表示停止时未确认。
+        activity是最后观察到的执行阶段，不是进程健康证明；重启会话后旧记录移除。
+        """
+        return runtime.request_status(session_id, request_id, wait_seconds)
 
     @mcp.tool(annotations=read)
     @background
@@ -412,15 +469,16 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
     def trigger_game_event(session_id: str, object_name: str, event: str, number: int = 0,
                            collision_object: str | None = None, key: str | int | None = None,
                            instance_id: int | str | None = None, limit: int = 32,
-                           dry_run: bool = True) -> dict:
+                           dry_run: bool = True, asynchronous: bool = False) -> dict:
         """通过桥接数据执行目标物体的事件代码（event_perform），不需要物理键鼠或前台焦点。
         支持 Keyboard/KeyPress/KeyRelease、Mouse、Collision、Alarm、User、Step/Other 等；
         Keyboard 类可用 key 指定名称或键码，Collision 用 collision_object 指定目标。
         省略 instance_id 时最多触发该物体 limit 个实例；也可直接传 inspect_game 返回的 id。Draw 和 Networking 异步事件不支持。
         只执行事件代码，不更新真实按键、鼠标坐标或碰撞状态。
+        长事件可选asynchronous=true立即返回request_id，用game_request_status查询结果；超时也不自动重放。
         """
         return runtime.trigger_event(session_id, object_name, event, number,
-                                     collision_object, key, instance_id, limit, dry_run)
+                                     collision_object, key, instance_id, limit, dry_run, asynchronous)
 
     @mcp.tool(annotations=change)
     @background
@@ -464,6 +522,39 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
         blocks = [TextContent(type='text', text=json.dumps(result, ensure_ascii=False))]
         blocks += [Image(data=picture, format='png').to_image_content() for picture in pictures]
         return blocks
+
+    @mcp.tool(annotations=read)
+    @background
+    def inspect_windows_export() -> dict:
+        """读取 Windows 导出元信息、配置哈希/覆盖状态和项目内图标尺寸/哈希；不读取 GML 版本。"""
+        return exports.inspect_windows(project)
+
+    @mcp.tool(annotations=change)
+    @background
+    def configure_windows_export(expected_sha256: str, executable_name: str | None = None,
+            display_name: str | None = None, version: str | None = None, product: str | None = None,
+            description: str | None = None, company: str | None = None, copyright: str | None = None,
+            icon: str | None = None, dry_run: bool = True) -> dict:
+        """按 Windows 配置哈希修改明确提供的导出字段；null保留，元信息允许空串清除。
+        文件名为无目录的.exe，版本为四段0～65535整数；icon为已存在的options/windows/icons/*.ico。
+        不改 GML 版本或其他窗口选项；图标/PE信息须最终打包验证，拒绝配置覆盖。
+        """
+        return exports.configure_windows(project, expected_sha256, dry_run, executable_name=executable_name,
+            display_name=display_name, version=version, product=product, description=description,
+            company=company, copyright=copyright, icon=icon)
+
+    @mcp.tool(annotations=change)
+    @background
+    def import_windows_icon(source_path: str, expected_windows_sha256: str,
+            destination: str = 'options/windows/icons/morx.ico', expected_icon_sha256: str | None = None,
+            expected_source_sha256: str | None = None, trim_transparency: bool = False,
+            padding: int = 16, dry_run: bool = True) -> dict:
+        """校验并导入ICO，或将PNG等比居中转为16/24/32/48/64/128/256七档ICO，不重绘源图。
+        PNG可裁透明空白，padding为256画布上的0～96像素留边；ICO原样复制。
+        图标和配置单事务；覆盖目标必须传expected_icon_sha256，源哈希可显式固定，预览报告全部文件。
+        """
+        return exports.import_icon(project, source_path, expected_windows_sha256, destination,
+            expected_icon_sha256, expected_source_sha256, trim_transparency, padding, dry_run)
 
     @mcp.tool(annotations=read)
     @background
@@ -665,16 +756,18 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
                         compression_quality: int | None = None, conversion_mode: str | None = None,
                         audio_group: str | None = None, sample_rate: int | None = None,
                         channel_format: str | None = None, bit_depth: int | None = None,
-                        dry_run: bool = True) -> dict:
+                        dry_run: bool = True, export_directory: str | None = None) -> dict:
         """按 inspect_sound 的描述哈希配置已有声音，默认预览，null 保留，单事务备份恢复。
         不改源音频、身份或资源树分组；配置覆盖暂不修改。写入后需重新编译。
         compression=uncompressed/compressed/decompress_on_load/streamed；streamed 仅接受 audiogroup_default。
         compression_quality=0～10，conversion_mode=automatic/required，sample_rate=8000～192000，
         channel_format=mono/stereo/3d，bit_depth=8/16（只影响未压缩）。
         OGG automatic 可直接复制原音频；需强制转换时使用 required。preload 不保证整段流常驻内存。
+        export_directory 为游戏包内相对目录，null保留、空串回根目录；组目录可能覆盖它。
         """
         return project.configure_sound(name, expected_sha256, volume, compression, preload, compression_quality,
-                                       conversion_mode, audio_group, sample_rate, channel_format, bit_depth, dry_run)
+                                       conversion_mode, audio_group, sample_rate, channel_format, bit_depth, dry_run,
+                                       export_directory)
 
     @mcp.tool(annotations=add)
     @background

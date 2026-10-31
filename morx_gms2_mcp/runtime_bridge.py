@@ -165,6 +165,8 @@ mcp_write = function(_name,_value) {
     mcp_flush_writes();
 };
 mcp_reply = function(_request,_ok,_data) {
+    mcp_write("ready.json",{session:mcp_session.session,bridge:mcp_session.bridge,frame:mcp_frame,
+        bridge_io:mcp_io_snapshot(),activity:{request:_request,state:"completed"}});
     mcp_write("response.json",{session:mcp_session.session,request:_request,
         ok:_ok,data:_data,frame:mcp_frame});
 };
@@ -644,6 +646,8 @@ try {
             mcp_until = mcp_frame + request.args.frames;
             break;
         case "event":
+            mcp_write("ready.json",{session:mcp_session.session,bridge:mcp_session.bridge,frame:mcp_frame,
+                bridge_io:mcp_io_snapshot(),activity:{request:request.request,state:"executing"}});
             var ev_name = request.args.object_name;
             var ev_source = asset_get_index(ev_name);
             if (ev_source == -1) {

@@ -37,7 +37,7 @@ class DeviceTests(unittest.TestCase):
 
     def upgrade_fixture(self, old_protocol=1, old_certificate=None, old_version=100):
         temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
-        root=Path(temporary.name)
+        root=Path(temporary.name).resolve(strict=True)
         chain={'paths':{'sdk_root':{'path':str(root)}},
                'components':{'java':'java.exe','keytool':'keytool.exe'},
                'dependencies':{'build_tools':{'effective_value':'35.0.0'}}}

@@ -22,7 +22,7 @@ class ToolchainTests(ProjectFixture):
         super().setUp()
         host_temp = tempfile.TemporaryDirectory()
         self.addCleanup(host_temp.cleanup)
-        self.host = Path(host_temp.name)
+        self.host = Path(host_temp.name).resolve(strict=True)
         # 这些夹具使用假Igor并落在宿主临时目录；AGP路径策略在独立用例验证，不依赖CI用户名。
         policy = patch.object(toolchain, 'build_path_issue', return_value=None)
         policy.start(); self.addCleanup(policy.stop)

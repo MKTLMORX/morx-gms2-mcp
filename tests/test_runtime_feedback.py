@@ -1,11 +1,13 @@
 """实战反馈回归：退出证据、日志阶段、精简列表、格式控制和独立 Runner。"""
 import asyncio
+import io
 import json
 from pathlib import Path
 import unittest
 from unittest.mock import patch
+from PIL import Image
 
-from morx_gms2_mcp.runtime import MAX_SESSION_SECONDS, atomic_json
+from morx_gms2_mcp.runtime import MAX_SESSION_SECONDS, atomic_json, key_codes
 from morx_gms2_mcp.sessions import RuntimePool
 from morx_gms2_mcp.server import build_server
 from tests import test_runtime as fixtures
@@ -22,6 +24,44 @@ class FeedbackTests(unittest.TestCase):
     def launch(self):
         self.fixture.launch()
         return self.fixture.session_id
+
+    def test_all_function_keys_preview_route_and_release_after_failure(self):
+        for number in range(1,13):
+            self.assertEqual(key_codes([f'f{number}']),[111+number])
+        self.assertEqual(key_codes(['F8']),[119])
+        for value in ('f0','f13','f24','f08','fn','F8 ',True):
+            with self.subTest(value=value),self.assertRaises(ValueError):key_codes([value])
+        with self.assertRaises(ValueError):key_codes(['f8','F8'])
+        sid=self.launch();self.fixture.ready()
+        self.assertTrue(self.rt.input(sid,['f8'],frames=2)['dry_run'])
+        self.assertFalse(self.rt._file('request.json').exists())
+        window=type('OwnedWindow',(),{'handle':1,'width':640,'height':360})()
+        with patch('morx_gms2_mcp.win_mouse.find_game_window',return_value=window),patch(
+                'morx_gms2_mcp.win_keyboard.key_down') as down,patch(
+                'morx_gms2_mcp.win_keyboard.key_up') as up,patch.object(self.rt,'wait',side_effect=ValueError('timeout')):
+            with self.assertRaisesRegex(ValueError,'timeout'):self.rt.input(sid,['f8'],2,False)
+        down.assert_called_once_with(window,[119]);up.assert_called_once_with(window,[119])
+
+    def test_capture_preserves_wide_edges_reports_resize_and_rejects_crop(self):
+        self.launch()
+        for raw_size,preview_size in (((1280,576),(1280,576)),((2560,1152),(1280,576))):
+            path=self.rt._file('capture_'+'a'*32+'.png')
+            picture=Image.new('RGB',raw_size,(0,0,0))
+            picture.paste((255,0,0),(0,0,20,raw_size[1]))
+            picture.paste((0,0,255),(raw_size[0]-20,0,raw_size[0],raw_size[1]))
+            picture.save(path)
+            capture={'raw_size':[float(value) for value in raw_size],'window_size':list(raw_size),'gui_size':[1280,576]}
+            raw=self.rt._capture_bytes('a'*32,capture)
+            with Image.open(io.BytesIO(raw)) as result:
+                self.assertEqual(result.size,preview_size)
+                self.assertEqual(result.getpixel((0,20)),(255,0,0))
+                self.assertEqual(result.getpixel((preview_size[0]-1,20)),(0,0,255))
+            self.assertEqual(capture['preview_size'],list(preview_size))
+            self.assertTrue(capture['dimensions_verified']);self.assertFalse(path.exists())
+        Image.new('RGB',(1024,576)).save(path)
+        with self.assertRaisesRegex(ValueError,'裁切'):
+            self.rt._capture_bytes('a'*32,{'raw_size':[1280,576]})
+        self.assertFalse(path.exists())
 
     def test_timeout_reports_deadline_and_retains_errors_after_cleanup(self):
         sid = self.launch()

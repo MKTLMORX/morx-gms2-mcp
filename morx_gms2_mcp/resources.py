@@ -32,7 +32,8 @@ EVENTS = {'Create': (0, 0, 'Create'), 'Destroy': (1, 0, 'Destroy'),
           'AnimationEnd': (7, 7, 'Other'), 'NoMoreLives': (7, 6, 'Other'),
           'NoMoreHealth': (7, 9, 'Other'), 'EndOfPath': (7, 8, 'Other'),
           'Outside': (7, 0, 'Other'), 'Boundary': (7, 1, 'Other'),
-          'AsyncNetworking': (7, 68, 'Other'), 'Networking': (7, 68, 'Other')}
+          'AsyncNetworking': (7, 68, 'Other'), 'Networking': (7, 68, 'Other'),
+          'AsyncSaveLoad': (7, 72, 'Other'), 'AsyncSystem': (7, 75, 'Other')}
 EVENT_STEMS = {0: 'Create', 1: 'Destroy', 2: 'Alarm', 3: 'Step', 4: 'Collision', 5: 'Keyboard',
                6: 'Mouse', 7: 'Other', 8: 'Draw', 9: 'KeyPress', 10: 'KeyRelease', 12: 'CleanUp', 13: 'Gesture'}
 INPUT_EVENTS = {'Keyboard': 5, 'KeyPress': 9, 'KeyRelease': 10}
@@ -76,6 +77,8 @@ def trigger_spec(event, number=0, collision_object=None):
         raise ValueError('Draw 事件不能由运行期事件触发器执行')
     if (typ, num) == (7, 68):
         raise ValueError('Networking 由真实网络回调触发，不能用事件触发器伪造 async_load')
+    if (typ, num) in {(7, 72), (7, 75)}:
+        raise ValueError('异步事件由真实 IO 或系统回调触发，不能用事件触发器伪造 async_load')
     if event == 'Collision':
         return 4, 0, collision
     return typ, num, None
@@ -88,7 +91,10 @@ def name_check(name):
         raise ValueError('禁止 Windows 保留名称')
 
 
-def group_check(group):
+def group_parts(group):
+    """校验逻辑路径各段，也可用于检查项目已保存的分组。"""
+    if not isinstance(group, str):
+        raise ValueError('分组路径须为字符串')
     if not group or len(group) > 240:
         raise ValueError('分组路径不能为空或过长')
     parts = group.split('/')
@@ -96,6 +102,16 @@ def group_check(group):
         if not part or part in ('.', '..') or part.endswith((' ', '.')) or re.search(r'[<>:"\\|?*\x00-\x1f]', part):
             raise ValueError('无效分组路径')
     return parts
+
+
+def group_check(group):
+    if isinstance(group, str):
+        path = group.replace('\\', '/')
+        if path.casefold().startswith('folders/') and path.casefold().endswith('.yy'):
+            logical = path[8:-3]
+            group_parts(logical)
+            raise ValueError(f'group={group!r} 是工程内部路径，请使用 IDE 逻辑路径 {logical!r}')
+    return group_parts(group)
 
 
 def finite(value, label, minimum=None):
@@ -143,6 +159,7 @@ def replace_refs(value, name, path, new_name, new_path):
 class Edit:
     def __init__(self, project):
         self.project, self.before, self.changes = project, {}, {}
+        self.group_plan = None
 
     def raw(self, rel):
         if rel not in self.before:
@@ -187,7 +204,10 @@ class Edit:
         changes = {k: v for k, v in self.changes.items() if k != self.project.yyp.name}
         if self.project.yyp.name in self.changes:
             changes[self.project.yyp.name] = self.changes[self.project.yyp.name]
-        return self.project.commit(changes, self.before, dry_run=dry_run)
+        result = self.project.commit(changes, self.before, dry_run=dry_run)
+        if self.group_plan is not None:
+            result['group_plan'] = self.group_plan
+        return result
 
 
 class Project(Storage):
@@ -694,25 +714,33 @@ class Project(Storage):
                 edit.save(ref['path'], data)
             return edit.commit(dry_run)
 
-    def _group(self, edit, group):
+    def _plan_group(self, project, order, group):
         parts = group_check(group)
-        project = edit.load(self.yyp.name)
-        order_rel = self.yyp.with_suffix('.resource_order').name
-        order = edit.load(order_rel, {'FolderOrderSettings': [], 'ResourceOrderSettings': []})
+        new_groups = []
         for i, part in enumerate(parts):
-            path = 'folders/' + '/'.join(parts[:i + 1]) + '.yy'
+            logical = '/'.join(parts[:i + 1])
+            path = 'folders/' + logical + '.yy'
             existing = [f for f in project.get('Folders', []) if f['folderPath'].casefold() == path.casefold()]
             if existing and existing[0]['folderPath'] != path:
                 raise ValueError('分组大小写与现有路径不一致')
             if not existing:
+                new_groups.append(logical)
                 project.setdefault('Folders', []).append(schemas.typed('GMFolder', **{'%Name': part},
                     name=part, folderPath=path))
                 peers = [v['order'] for v in order['FolderOrderSettings']
                          if v['path'].rsplit('/', 1)[0] == path.rsplit('/', 1)[0]]
                 order['FolderOrderSettings'].append({'name': part, 'path': path, 'order': max(peers, default=-1) + 1})
+        return {'name': parts[-1], 'path': 'folders/' + group + '.yy'}, new_groups
+
+    def _group(self, edit, group):
+        project = edit.load(self.yyp.name)
+        order_rel = self.yyp.with_suffix('.resource_order').name
+        order = edit.load(order_rel, {'FolderOrderSettings': [], 'ResourceOrderSettings': []})
+        parent, new_groups = self._plan_group(project, order, group)
         edit.save(order_rel, order)
         edit.save(self.yyp.name, project)
-        return {'name': parts[-1], 'path': 'folders/' + group + '.yy'}
+        edit.group_plan = {'target': group, 'exists': group not in new_groups, 'new_groups': new_groups}
+        return parent
 
     def ensure_group(self, group, dry_run=False):
         with self.lock:
@@ -777,9 +805,11 @@ class Project(Storage):
         edit.save(order_rel, order)
         return rel
 
-    def _ref(self, edit, name, kind=None):
+    def _ref(self, edit, name, kind=None, *, meta=None):
         name_check(name)
-        refs = [x['id'] for x in edit.load(self.yyp.name)['resources'] if x['id']['name'] == name]
+        if meta is None:
+            meta = edit.load(self.yyp.name)
+        refs = [x['id'] for x in meta['resources'] if x['id']['name'] == name]
         if len(refs) != 1:
             raise ValueError('资源未唯一注册：' + name)
         data = edit.load(refs[0]['path'])
@@ -813,6 +843,94 @@ class Project(Storage):
             data['parent'] = self._group(edit, group)
             edit.save(ref['path'], data)
             return edit.commit(dry_run)
+
+    def organize_resource_groups(self, moves=None, remove_groups=None,
+                                 expected_plan_sha256=None, dry_run=True):
+        moves = [] if moves is None else moves
+        remove_groups = [] if remove_groups is None else remove_groups
+        if (not isinstance(moves, list) or not isinstance(remove_groups, list)
+                or not 1 <= len(moves) + len(remove_groups) <= 128):
+            raise ValueError('moves 和 remove_groups 须为列表，合计 1～128 项')
+        seen = set()
+        for move in moves:
+            if (not isinstance(move, dict) or set(move) != {'name', 'group'}
+                    or not isinstance(move['name'], str)):
+                raise ValueError('每项移动须提供资源名 name 和逻辑分组 group')
+            name_check(move['name'])
+            group_check(move['group'])
+            key = move['name'].casefold()
+            if key in seen:
+                raise ValueError('批次中资源重复：' + move['name'])
+            seen.add(key)
+        removals = set()
+        for group in remove_groups:
+            group_check(group)
+            if group.casefold() in removals:
+                raise ValueError('批次中清理分组重复：' + group)
+            removals.add(group.casefold())
+        if not dry_run and expected_plan_sha256 is None:
+            raise ValueError('请先预览并提供返回的 plan_sha256 作为 expected_plan_sha256')
+
+        with self.lock:
+            edit = Edit(self)
+            meta = edit.load(self.yyp.name)
+            order_rel = self.yyp.with_suffix('.resource_order').name
+            order = edit.load(order_rel, {'FolderOrderSettings': [], 'ResourceOrderSettings': []})
+            # 清理只接受批次开始前已存在的组，避免误列新建目标。
+            for group in remove_groups:
+                path = 'folders/' + group + '.yy'
+                matches = [row['folderPath'] for row in meta.get('Folders', [])
+                           if row['folderPath'].casefold() == path.casefold()]
+                if matches != [path]:
+                    raise ValueError('分组不存在或不唯一：' + group)
+
+            targets, new_groups, moved = {}, [], []
+            for move in moves:
+                name, group = move['name'], move['group']
+                ref, data = self._ref(edit, name, meta=meta)
+                if group not in targets:
+                    parent, added = self._plan_group(meta, order, group)
+                    targets[group] = parent
+                    new_groups.extend(added)
+                parent = targets[group]
+                previous = data.get('parent') or {}
+                source = previous.get('path', '')
+                source_group = source[8:-3] if source.startswith('folders/') and source.endswith('.yy') else None
+                moved.append({'name': name, 'from_group': source_group, 'group': group})
+                if previous != parent:
+                    data['parent'] = parent
+                    edit.save(ref['path'], data, preserve_trailing=True)
+
+            removed = sorted(remove_groups, key=lambda group: -group.count('/'))
+            if removed:
+                paths = {'folders/' + group + '.yy' for group in removed}
+                folded_paths = {path.casefold() for path in paths}
+                for entry in meta['resources']:
+                    ref = entry['id']
+                    path = (edit.load(ref['path']).get('parent') or {}).get('path')
+                    if path is not None and path.casefold() in folded_paths:
+                        raise ValueError(f'分组 {path[8:-3]} 仍有资源 {ref["name"]}，整批取消')
+                remaining = [row for row in meta['Folders'] if row['folderPath'] not in paths]
+                for group in removed:
+                    prefix = 'folders/' + group.casefold() + '/'
+                    if any(row['folderPath'].casefold().startswith(prefix) for row in remaining):
+                        raise ValueError('分组仍有未列入清理的子组，整批取消：' + group)
+                meta['Folders'] = remaining
+                order['FolderOrderSettings'] = [row for row in order.get('FolderOrderSettings', [])
+                                                if row['path'] not in paths]
+            if new_groups or removed:
+                edit.save(self.yyp.name, meta, preserve_trailing=True)
+                if new_groups or edit.raw(order_rel) is not None:
+                    edit.save(order_rel, order, preserve_trailing=True)
+
+            # 包含空组检查读取的描述文件，确保提交时仍依据同一份工程内容。
+            plan = {'moves': moved, 'new_groups': new_groups, 'remove_groups': removed}
+            plan_sha256 = digest(encode({**plan,
+                'before': {path: digest(raw) for path, raw in sorted(edit.before.items())},
+                'after': {path: digest(raw) for path, raw in sorted(edit.changes.items())}}))
+            if expected_plan_sha256 is not None and expected_plan_sha256 != plan_sha256:
+                raise ValueError('批次内容或工程文件已变化，请重新预览')
+            return {**edit.commit(dry_run), **plan, 'plan_sha256': plan_sha256}
 
     def _resource_files(self, relative):
         root = self.path(relative)

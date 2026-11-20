@@ -114,6 +114,37 @@ class ScenarioTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.engine.start(self.sid, [step])
 
+    def test_set_event_assert_executes_each_mutation_once(self):
+        calls = []
+        def response(session, command, args=None, **kwargs):
+            calls.append((command, args))
+            return {'data': {'globals': {'score': 2}}, 'frame': len(calls)}
+        steps = [{'action': 'set', 'scope': 'globals', 'values': {'score': 0}},
+                 {'action': 'event', 'object_name': 'obj_probe', 'event': 'User', 'number': 4},
+                 self.assertion()]
+        with patch.object(self.rt, 'request', side_effect=response):
+            self.assertTrue(self.engine.start(self.sid, steps)['dry_run'])
+            self.assertEqual(calls, [])
+            job = self.engine.start(self.sid, steps, dry_run=False)
+            result = self.finish(job['test_id'])
+        self.assertEqual(result['status'], 'passed')
+        self.assertEqual([cmd for cmd, args in calls], ['set', 'event', 'state'])
+        self.assertEqual(calls[1][1]['event_type'], 7)
+        self.assertEqual(calls[1][1]['event_number'], 14)
+        self.assertEqual(steps[1]['number'], 4)
+        self.assertNotIn('event_type', steps[1])
+
+    def test_internal_event_fields_and_async_rejected_before_mutations(self):
+        for event in ({'event': 'User', 'number': 4, 'event_type': 7, 'event_number': 14},
+                      {'event': 'AsyncSaveLoad'}, {'event': 'AsyncSystem'}):
+            with patch.object(self.rt, 'request') as request:
+                with self.assertRaises(ValueError):
+                    self.engine.start(self.sid, [
+                        {'action': 'set', 'scope': 'globals', 'values': {'score': 0}},
+                        {'action': 'event', 'object_name': 'obj_probe', **event},
+                        self.assertion()], dry_run=False)
+                request.assert_not_called()
+
     def test_wait_until_only_requeries_and_passes(self):
         calls = []
         def response(session, command, args=None, timeout=15):

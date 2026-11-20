@@ -219,6 +219,12 @@ class SceneTests:
             return rt.mouse(session_id, step['mouse_action'], dry_run=False, **args)
         if action == 'audio':
             return self._observe(session_id, step)
+        if action == 'event':
+            # normalize 已校验并转换事件身份；不能再次按外部参数解析。
+            response = rt.request(session_id, 'event',
+                                  {k: v for k, v in step.items() if k != 'action'})
+            return {'index': 1, 'action': action, 'data': response.get('data'),
+                    'frame': response.get('frame')}
         result = rt.run_sequence(session_id, [step], dry_run=False)
         if not result['ok']:
             raise ValueError(str(result['results'][-1].get('error', '步骤失败')))

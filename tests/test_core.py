@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from morx_gms2_mcp.resources import Project, name_check
-from morx_gms2_mcp.storage import encode, parse_yy
+from morx_gms2_mcp.storage import FileConflict, encode, parse_yy
 
 
 class ProjectFixture(unittest.TestCase):
@@ -73,6 +73,30 @@ class ProjectTests(ProjectFixture):
         with self.assertRaises(ValueError):
             self.project.commit({'test.yyp': b'new'}, before)
         self.assertEqual(self.project.yyp.read_bytes(), b'changed')
+
+    def test_write_readback_preserves_external_version_and_backup(self):
+        self.project.create('scripts', 'scr_probe', 'old')
+        info = self.project.read_code('scr_probe')
+        path = self.root / info['path']
+        write = self.project._write
+        def ide_save(relative, data):
+            write(relative, data)
+            if relative == info['path']:
+                path.write_bytes(b'IDE saved a different version')
+        with patch.object(self.project, '_write', side_effect=ide_save) as writes:
+            with self.assertRaises(FileConflict) as caught:
+                self.project.update_code('scr_probe', 'new', info['sha256'], dry_run=False)
+        error = caught.exception.details
+        self.assertEqual(error['code'], 'write_conflict')
+        self.assertEqual([row['path'] for row in error['conflicts']], [info['path']])
+        self.assertEqual(sum(call.args[0] == info['path'] for call in writes.call_args_list), 1)
+        self.assertEqual(path.read_bytes(), b'IDE saved a different version')
+        journal = self.project.journal / error['transaction']
+        self.assertEqual((journal / 'before' / info['path']).read_bytes(), b'old')
+        self.assertEqual((journal / 'after' / info['path']).read_bytes(), b'new')
+        self.assertEqual(self.project.transactions()[0]['status'], 'write_conflict')
+        with self.assertRaisesRegex(ValueError, '拒绝覆盖'):
+            self.project.restore(error['transaction'], False)
 
     def test_mid_write_failure_restores_existing_and_new_files(self):
         original = self.project._write

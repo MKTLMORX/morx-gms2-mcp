@@ -22,7 +22,7 @@
 
 ## 功能
 
-76 个工具，覆盖项目制作与运行检查。支持 Codex、Claude Code 等本地 MCP 客户端。
+105 个工具，覆盖项目制作与运行检查。支持 Codex、Claude Code 等本地 MCP 客户端。
 
 | 领域 | 支持的操作 |
 | --- | --- |
@@ -30,6 +30,7 @@
 | **代码与场景** | 读写 GML，创建脚本、物体、网络异步事件、房间、实例和瓦片图层 |
 | **美术与音频** | 编辑精灵和纹理组，导入音频与字体，设置流式播放及导出目录 |
 | **显示与资源** | 配置窗口、相机和视口，设置 Windows 导出信息与图标，整理资源 |
+| **Android** | 配置选项、图标、启动图和原生扩展，隔离打包与签名验证，ADB 部署及开发包观察接口 |
 | **修改与恢复** | 预览变更、检测冲突、保存备份并撤销 |
 
 ## 快速开始
@@ -105,7 +106,7 @@ $gameProject = 'D:\Games\MyGame'
 
 ## 适用范围
 
-- 支持现代 `GMProject v1` 项目；运行目标为 **Windows VM**。已验证 IDE 2026.0.0.16 / Runtime 2026.0.0.23，其他版本需自行验证。
+- 支持现代 `GMProject v1` 项目；已验证 **Windows VM 运行与 Android arm64 VM APK 导出**，IDE 2026.0.0.16 / Runtime 2026.0.0.23。Android 设备接口尚待真机验证，详见 [Android 工作流](docs/reference.md#android-导出与设备)。
 - 截图和状态由游戏内桥接提供，支持运行中检查；**不提供 IDE 操控、原生断点或暂停/逐行调试**。默认键鼠输入使用窗口消息，物理鼠标输入需显式选择。
 - 运行使用独立副本和存档，停止后清理。它仍以当前用户权限执行，仅对受信任项目启用 `--allow-run`。
 - 资源修改直接作用于绑定项目，先保存 IDE 内容，避免同时写入。重命名资源不会改写 GML 中的资源名；结构校验不能代替编译和实际运行检查。
@@ -113,7 +114,7 @@ $gameProject = 'D:\Games\MyGame'
 ## 文档与支持
 
 - [安装与客户端配置](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/setup.md)：pipx、源码安装、升级、运行环境和连接排查。
-- [工具与用法](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/reference.md)：全部 76 个工具、导出配置、纹理与音频设置、运行诊断及支持限制。
+- [工具与用法](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/reference.md)：全部 105 个工具、导出配置、纹理与音频设置、运行诊断及支持限制。
 - [更新记录](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/CHANGELOG.md) · [报告问题](https://github.com/MKTLMORX/morx-gms2-mcp/issues) · [贡献指南](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/CONTRIBUTING.md) · [安全说明](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/SECURITY.md)
 
 独立社区项目，与 GameMaker 官方无隶属关系。采用 [MIT 许可证](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/LICENSE)。

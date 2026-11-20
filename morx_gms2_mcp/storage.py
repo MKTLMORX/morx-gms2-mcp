@@ -30,6 +30,21 @@ def digest(data):
     return hashlib.sha256(data).hexdigest() if data is not None else None
 
 
+class FileConflict(ValueError):
+    def __init__(self, code, conflicts, transaction=None):
+        names = '、'.join(row['path'] for row in conflicts[:5])
+        extra = f' 等共 {len(conflicts)} 个文件' if len(conflicts) > 5 else ''
+        message = ('写后回读发现文件与预期不符：' if code == 'write_conflict'
+                   else '编译前复核发现文件与预期不符：') + names + extra
+        if transaction:
+            message += '；已保留事务备份 ' + transaction
+        super().__init__(message)
+        self.details = {'code': code, 'message': message, 'conflicts': conflicts[:64],
+                        'conflict_count': len(conflicts), 'diagnostic_id': uuid.uuid4().hex}
+        if transaction:
+            self.details['transaction'] = transaction
+
+
 def encode(data):
     return (json.dumps(data, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
 
@@ -126,6 +141,8 @@ class Storage:
             raise ValueError('项目绑定与启动目标不一致')
         self.lock = ProjectLock(self.path('.codex/gms2-resource.lock'))
         self.journal = self.path('.codex/gms2-resource-backups')
+        self._recent_files = {}
+        self._recent_guard = threading.Lock()
 
     def path(self, relative):
         if not isinstance(relative, str) or '\\' in relative or ':' in relative:
@@ -189,14 +206,90 @@ class Storage:
             rel, data = self._manifest(path.parent.name)
             result.append({'id': path.parent.name, 'status': data['status'],
                            'files': [i['path'] for i in data['files']]})
+            if data['status'] == 'write_conflict':
+                result[-1]['conflicts'] = data.get('conflicts', [])
+                result[-1]['conflict_count'] = data.get('conflict_count', len(result[-1]['conflicts']))
         return result
+
+    def _remember_changes(self, rows, field='after_sha256'):
+        with self._recent_guard:
+            for row in rows:
+                if not row['path'].startswith('.codex/'):
+                    self._recent_files[row['path']] = row[field]
+
+    def build_expectations(self, transactions=None):
+        """默认复核此服务写过的工程文件；也支持从指定备份恢复校验基线。"""
+        if transactions is None:
+            with self._recent_guard:
+                return self._recent_files.copy()
+        if (not isinstance(transactions, list) or len(transactions) > 128
+                or any(not isinstance(txid, str) or not re.fullmatch('[a-f0-9]{32}', txid) for txid in transactions)
+                or len(set(transactions)) != len(transactions)):
+            raise ValueError('expected_transactions 须为最多128个不重复的事务号，按提交顺序传入')
+        result = {}
+        with self.lock:
+            for txid in transactions:
+                _, manifest = self._manifest(txid)
+                if manifest['status'] not in ('committed', 'write_conflict'):
+                    raise ValueError('事务不能作为编译基线：' + txid)
+                for row in manifest['files']:
+                    if not row['path'].startswith('.codex/'):
+                        result[row['path']] = row['after_sha256']
+        return result
+
+    def _file_digest(self, relative, check_cancel):
+        path = self.path(relative)
+        hasher = hashlib.sha256()
+        try:
+            with path.open('rb') as file:
+                before = os.fstat(file.fileno())
+                for chunk in iter(lambda: file.read(1024 * 1024), b''):
+                    check_cancel()
+                    hasher.update(chunk)
+        except FileNotFoundError:
+            return None
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+            raise ValueError('文件在回读期间改变')
+        return hasher.hexdigest()
+
+    def verify_files(self, expected, copied=None, *, transaction=None, check_cancel=lambda: None):
+        conflicts = []
+        for relative, wanted in expected.items():
+            check_cancel()
+            row = {'path': relative, 'expected_sha256': wanted}
+            try:
+                actual = self._file_digest(relative, check_cancel)
+            except (InterruptedError, TimeoutError):
+                raise
+            except (ValueError, OSError):
+                conflicts.append({**row, 'reason': 'unreadable'})
+                continue
+            if actual != wanted:
+                conflicts.append({**row, 'actual_sha256': actual, 'reason': 'disk_changed'})
+            elif copied is not None and copied.get(relative) != wanted:
+                conflicts.append({**row, 'actual_sha256': copied.get(relative), 'reason': 'snapshot_changed'})
+        if conflicts:
+            raise FileConflict('write_conflict' if transaction else 'source_conflict', conflicts, transaction)
 
     def _check_write_path(self, relative):
         p = self.path(relative)
         parts = PurePosixPath(relative).parts
         first = parts[0]
         if relative in (self.yyp.name, self.yyp.with_suffix('.resource_order').name,
-                        'options/windows/options_windows.yy', '.codex/morx-snapshot.json'):
+                        'options/windows/options_windows.yy', 'options/android/options_android.yy',
+                        '.codex/morx-snapshot.json', '.codex/morx-android-toolchain.json',
+                        '.codex/morx-android-signing.json'):
+            return p
+        if len(parts) == 4 and parts[:3] == ('options', 'android', 'splash'):
+            from .android import SPLASH_PATHS
+            if relative not in SPLASH_PATHS:
+                raise ValueError('仅允许指定的 Android 横屏和竖屏启动图路径')
+            return p
+        if len(parts) == 5 and parts[:3] == ('options', 'android', 'morx_icons'):
+            from .android import DENSITIES
+            if parts[3] not in ('legacy', 'foreground', 'background') or parts[4] not in {d + '.png' for d in DENSITIES}:
+                raise ValueError('仅允许固定 Android 密度图标路径')
             return p
         if len(parts) == 4 and parts[:3] == ('options', 'windows', 'icons'):
             from .exports import file_name
@@ -205,6 +298,14 @@ class Storage:
         if first == 'datafiles':
             if len(parts) < 3 or parts[1] != 'fonts':
                 raise ValueError('只允许写入 datafiles/fonts：' + relative)
+            return p
+        if first == 'extensions':
+            from .extensions import relative_file
+            from .resources import name_check
+            if len(parts) < 3:
+                raise ValueError('扩展路径须位于独立资源目录')
+            name_check(parts[1])
+            relative_file('/'.join(parts[2:]))
             return p
         if first not in {'scripts', 'objects', 'rooms', 'sprites', 'sounds', 'shaders', 'tilesets'}:
             raise ValueError('不是本服务支持的资源路径：' + relative)
@@ -218,13 +319,14 @@ class Storage:
                 raise ValueError('变更缺少原文件快照')
             for rel in changes:
                 self._check_write_path(rel)
-            if not recovery and any(t['status'] in ('prepared', 'writing', 'recovery_required') for t in self.transactions()):
+            changes = {rel: value for rel, value in changes.items() if value != before[rel]}
+            if changes and not dry_run and not recovery and any(
+                    t['status'] in ('prepared', 'writing', 'recovery_required') for t in self.transactions()):
                 raise ValueError('存在未完成事务，先检查并恢复备份')
             for rel, expected in before.items():
                 actual = self.snapshot([rel])[rel]
                 if actual != expected:
                     raise ValueError('文件被外部修改，停止写入：' + rel)
-            changes = {rel: value for rel, value in changes.items() if value != before[rel]}
             summary = [{'path': rel, 'action': 'delete' if new is None else 'create' if before[rel] is None else 'update',
                         'before_sha256': digest(before[rel]), 'after_sha256': digest(new)} for rel, new in changes.items()]
             if dry_run or not changes:
@@ -247,8 +349,17 @@ class Storage:
                         raise ValueError('提交时检测到外部修改：' + rel)
                     self._write(rel, data)
                     written.append(rel)
+                self.verify_files({row['path']: row['after_sha256'] for row in summary}, transaction=txid)
                 manifest['status'] = 'committed'
                 self._write(f'{directory}/manifest.json', encode(manifest))
+            except FileConflict as exc:
+                # Files may now belong to the IDE. Preserve disk contents and both backups.
+                manifest['status'] = 'write_conflict'
+                manifest['conflicts'] = exc.details['conflicts']
+                manifest['conflict_count'] = exc.details['conflict_count']
+                self._write(f'{directory}/manifest.json', encode(manifest))
+                self._remember_changes(summary)
+                raise
             except Exception as exc:
                 failed = []
                 for rel in reversed(written):
@@ -263,7 +374,8 @@ class Storage:
                 manifest['restore_failed'] = failed
                 self._write(f'{directory}/manifest.json', encode(manifest))
                 raise
-            return {'project': str(self.yyp), 'dry_run': False, 'changed': list(changes),
+            self._remember_changes(summary)
+            return {'project': str(self.yyp), 'dry_run': False, 'changed': list(changes), 'readback_verified': True,
                     'files': summary, 'transaction': txid, 'backup': str(self.path(directory))}
 
     def restore(self, txid, dry_run=True):
@@ -297,4 +409,5 @@ class Storage:
                     undo['status'] = 'restored'
                     undo['restores'] = txid
                     self._write(undo_rel, encode(undo))
+                self._remember_changes(manifest['files'], 'before_sha256')
             return result

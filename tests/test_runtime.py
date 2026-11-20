@@ -149,6 +149,53 @@ class RuntimeTests(ProjectFixture):
         self.assertFalse((self.root / '.codex/morx-runtime').exists())
         self.assertIsNone(self.runtime.session)
 
+    def test_compile_blocks_an_external_save_after_mcp_write(self):
+        result = self.project.create('scripts', 'scr_probe', 'function scr_probe() { return 1; }')
+        self.assertTrue(result['readback_verified'])
+        relative = 'scripts/scr_probe/scr_probe.gml'
+        path = self.project.path(relative)
+        path.write_bytes(path.read_bytes().replace(b'return 1', b'return 2'))
+        external = path.read_bytes()
+        with patch('morx_gms2_mcp.runtime.subprocess.Popen') as compiler:
+            with self.assertRaisesRegex(ValueError, 'scr_probe.gml'):
+                self.runtime.run(compile_only=True)
+            restarted = Runtime(type(self.project)(self.root), self.options)
+            self.addCleanup(restarted.close)
+            with self.assertRaisesRegex(ValueError, 'scr_probe.gml'):
+                restarted.run(compile_only=True, expected_transactions=[result['transaction']])
+            self.assertTrue(self.runtime.run(compile_only=True, expected_transactions=[])['dry_run'])
+            session = self.runtime.run(dry_run=False, compile_only=True)
+            self.assertTrue(self.runtime.session['preparation_done'].wait(5))
+            status = self.runtime.status()
+            compiler.assert_not_called()
+        self.assertEqual(status['build_status'], 'failed')
+        self.assertEqual(status['preparation']['preparation_error']['code'], 'source_conflict')
+        self.assertEqual(status['preparation']['preparation_error']['conflicts'][0]['path'], relative)
+        self.assertEqual(path.read_bytes(), external)
+        self.runtime.stop(session['session_id'], False)
+
+    def test_compile_checks_copied_bytes_even_if_source_changes_back(self):
+        self.project.create('scripts', 'scr_probe', 'function scr_probe() { return 1; }')
+        relative = 'scripts/scr_probe/scr_probe.gml'
+        path = self.project.path(relative)
+        intended = path.read_bytes()
+        copy = self.runtime._copy_project
+        def race(*args):
+            path.write_bytes(intended.replace(b'return 1', b'return 2'))
+            try:
+                return copy(*args)
+            finally:
+                path.write_bytes(intended)
+        with patch.object(self.runtime, '_copy_project', side_effect=race), \
+                patch('morx_gms2_mcp.runtime.subprocess.Popen') as compiler:
+            self.runtime.run(dry_run=False, compile_only=True)
+            self.assertTrue(self.runtime.session['preparation_done'].wait(5))
+            compiler.assert_not_called()
+        conflict = self.runtime.status()['preparation']['preparation_error']['conflicts'][0]
+        self.assertEqual(conflict['path'], relative)
+        self.assertEqual(conflict['reason'], 'snapshot_changed')
+        self.assertEqual(path.read_bytes(), intended)
+
     def test_isolated_copy_save_directory_and_no_license_copy(self):
         self.project.install_runtime_bridge(dry_run=False)
         before = self.project.yyp.read_bytes()
@@ -667,7 +714,7 @@ class RuntimeTests(ProjectFixture):
             'TileCompressedData': [-4, 1]}
         self.project.path('rooms/Room1/Room1.yy').write_bytes(encode(room))
         with patch('morx_gms2_mcp.runtime.subprocess.Popen') as launch:
-            self.assertTrue(self.runtime.run(compile_only=True)['dry_run'])
+            self.assertTrue(self.runtime.run(compile_only=True, expected_transactions=[])['dry_run'])
             launch.assert_not_called()
 
     def test_sequence_state_supports_globals_and_instance_id(self):
@@ -828,7 +875,7 @@ class RuntimeTests(ProjectFixture):
             server = build_server(self.root, runtime_options=self.options)
         async def verify():
             tools = await server.list_tools()
-            self.assertEqual(len(tools), 76)
+            self.assertEqual(len(tools), 105)
             for tool in tools:
                 if not tool.annotations.readOnlyHint:
                     self.assertTrue(tool.inputSchema['properties']['dry_run']['default'])

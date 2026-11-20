@@ -1,6 +1,6 @@
 """只读校验注册资源及已支持的引用，不扫描参考目录。"""
 from pathlib import PurePosixPath
-from .resources import KINDS, EVENT_STEMS, group_check, walk_layers
+from .resources import KINDS, EVENT_STEMS, group_parts, walk_layers
 from .animation import number
 from .display import WINDOWS_PATH, windows_settings, room_settings
 from . import tiles as tile_storage
@@ -25,7 +25,7 @@ def validate(project):
             if not path.startswith('folders/') or not path.endswith('.yy'):
                 errors.append('无效虚拟分组路径：' + path)
                 continue
-            group_check(path[8:-3])
+            group_parts(path[8:-3])
             parent = path.rsplit('/', 1)[0]
             if parent != 'folders' and parent + '.yy' not in folders:
                 errors.append('分组缺少父组：' + path)

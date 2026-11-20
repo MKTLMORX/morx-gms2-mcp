@@ -4,6 +4,41 @@ from tests.test_core import ProjectFixture
 
 
 class NetworkingTests(ProjectFixture):
+    def test_save_load_and_system_transactions(self):
+        for name, number in [('AsyncSaveLoad', 72), ('AsyncSystem', 75)]:
+            with self.subTest(event=name):
+                before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+                self.project.add_event('obj_network', name, '// preview\n', dry_run=True)
+                self.assertEqual(before, {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+                self.project.add_event('obj_network', name, '// callback\n')
+                read = self.project.read_code('obj_network', name)
+                self.assertTrue(read['path'].endswith(f'Other_{number}.gml'))
+                path = self.root / read['path']
+                path.write_bytes(b'\xef\xbb\xbf// callback\r\n')
+                read = self.project.read_code('obj_network', name)
+                self.project.update_code('obj_network', '// changed\n', read['sha256'], name, dry_run=False)
+                self.assertEqual(path.read_bytes(), b'\xef\xbb\xbf// changed\r\n')
+                with self.assertRaises(ValueError):
+                    self.project.update_code('obj_network', '// stale', read['sha256'], name, dry_run=False)
+                with self.assertRaises(ValueError):
+                    self.project.add_event('obj_network', name, '// duplicate')
+                removed = self.project.remove_event('obj_network', name, dry_run=False)
+                self.assertFalse(path.exists())
+                self.project.restore(removed['transaction'], False)
+                self.assertEqual(path.read_bytes(), b'\xef\xbb\xbf// changed\r\n')
+                self.assertTrue(self.project.validate()['ok'])
+
+    def test_async_events_reject_manual_trigger_and_arbitrary_numbers(self):
+        for name, number in [('AsyncSaveLoad', 72), ('AsyncSystem', 75)]:
+            self.assertEqual(event_spec(name, 0), (7, number, 'Other', None))
+            with self.assertRaises(ValueError):
+                event_spec(name, number)
+            with self.assertRaisesRegex(ValueError, '真实 IO'):
+                trigger_spec(name)
+        for name in ('AsyncUnknown', 'Other', 'CloseButton'):
+            with self.assertRaises(ValueError):
+                event_spec(name, 72)
+
     def setUp(self):
         super().setUp()
         self.project.create('objects', 'obj_network')

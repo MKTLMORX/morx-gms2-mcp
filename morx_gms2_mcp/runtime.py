@@ -20,7 +20,7 @@ from uuid import uuid4
 from PIL import Image
 from .display import integer
 from .resources import name_check, trigger_spec, replace_refs
-from .storage import compact_encode, encode, parse_yy, replace_retry
+from .storage import FileConflict, compact_encode, encode, parse_yy, replace_retry
 
 CREDENTIAL_OUTPUT = re.compile(
     r'(?i)licen[cs]e|access.?key|api.?key|secret|token|password|authorization|authentication')
@@ -98,7 +98,11 @@ def child_path(root, name):
 
 KEY_NAMES = {'backspace': 8, 'tab': 9, 'enter': 13, 'escape': 27, 'space': 32,
              'pageup': 33, 'pagedown': 34, 'end': 35, 'home': 36,
-             'left': 37, 'up': 38, 'right': 39, 'down': 40, 'insert': 45, 'delete': 46}
+             'left': 37, 'up': 38, 'right': 39, 'down': 40, 'insert': 45, 'delete': 46,
+             'oem_1': 186, 'oem_plus': 187, 'oem_comma': 188, 'oem_minus': 189, 'oem_period': 190,
+             'oem_2': 191, 'oem_3': 192, 'grave': 192, 'backtick': 192, 'tilde': 192,
+             'oem_4': 219, 'oem_5': 220, 'oem_6': 221, 'oem_7': 222, 'oem_102': 226}
+KEY_NAMES.update({f'f{number}': 111 + number for number in range(1, 13)})
 
 
 def instance_ref(value):
@@ -568,6 +572,8 @@ class Runtime:
             if session is not None:
                 session['source_snapshot_sha256'] = hashlib.sha256(
                     compact_encode(sorted(manifest))).hexdigest()
+                expected = session.get('expected_files', {})
+                session['copied_expected_files'] = {p: h for p, h in manifest if p in expected}
             # GameMaker 模板允许资源直接挂在工程根；副本改名时这些引用也必须更新。
             meta = parse_yy((destination / self.project.yyp.name).read_text(encoding='utf-8-sig'))
             for resource in meta.get('resources', []):
@@ -643,7 +649,7 @@ class Runtime:
                 pass
         return {'cleaned': all(item['cleaned'] for item in results), 'cleanup': results}
 
-    def run(self, dry_run=True, compile_only=False, launch_mode='igor'):
+    def run(self, dry_run=True, compile_only=False, launch_mode='igor', expected_transactions=None):
         if launch_mode not in ('igor', 'direct') or (compile_only and launch_mode != 'igor'):
             raise ValueError('launch_mode 须为 igor 或 direct；只编译不接受 direct')
         with self.guard:
@@ -663,7 +669,10 @@ class Runtime:
                            'note': '内存取决于项目和 Runtime；direct 编译结束后 Igor 退出，再启动独立 Runner，每端仍独立编译。'}}
             if launch_mode == 'direct' and not (root / 'windows/x64/Runner.exe').is_file():
                 raise ValueError('direct 模式需要本机 Runtime 的 windows/x64/Runner.exe')
+            expected_files = self.project.build_expectations(expected_transactions)
+            preview['source_check_files'] = len(expected_files)
             if dry_run:
+                self.project.verify_files(expected_files)
                 if not compile_only:
                     self._bridge()
                 if not self.project.validate()['ok']:
@@ -680,7 +689,7 @@ class Runtime:
                 'compile_only': compile_only, 'phase': 'preparing', 'phase_started': time.monotonic(),
                 'launch_mode': launch_mode, 'process_kind': 'build',
                 'copied_files': 0, 'copied_bytes': 0, 'cancel': threading.Event(),
-                'preparation_done': threading.Event()}
+                'preparation_done': threading.Event(), 'expected_files': expected_files}
             self.redactions = [str(user), str(root), str(self.project.root),
                                str(sandbox), str(savedir), str(Path.home())]
             self.session, self.process, self.pending = session, None, None
@@ -755,6 +764,7 @@ class Runtime:
             self._check_cancel(session)
             with self.project.lock:
                 self._check_cancel(session)
+                self.project.verify_files(session['expected_files'], check_cancel=lambda: self._check_cancel(session))
                 key = None if session['compile_only'] else self._bridge()
                 if not self.project.validate()['ok']:
                     raise ValueError('项目结构检查失败，先调用 inspect_project')
@@ -776,6 +786,8 @@ class Runtime:
                 '/cache=' + str(directory / 'cache'), '/temp=' + str(directory / 'temp'),
                 '/runtime=VM', '--', 'Windows',
                 'Compile' if session['compile_only'] or session['launch_mode'] == 'direct' else 'Run']
+            self.project.verify_files(session['expected_files'], session.get('copied_expected_files', {}),
+                                      check_cancel=lambda: self._check_cancel(session))
             with self.guard:
                 self._check_cancel(session)
                 session['launch_args'] = args
@@ -803,6 +815,10 @@ class Runtime:
                     self._launch_runner(session, root)
         except InterruptedError:
             self._phase(session, 'cancelled')
+        except FileConflict as exc:
+            with self.guard:
+                session['preparation_error'] = {'type': type(exc).__name__, **exc.details}
+                self._phase(session, 'failed')
         except Exception as exc:
             with self.guard:
                 session['preparation_error'] = {'type': type(exc).__name__,
@@ -1022,7 +1038,7 @@ class Runtime:
                     if not result['ok']:
                         raise self._request_error(str(result['data'].get('error', '游戏请求失败')), 'game_command_failed', request_id)
                     if command == 'capture':
-                        result['image'] = self._capture_bytes(request_id)
+                        result['image'] = self._capture_bytes(request_id, result.get('data', {}).get('capture'))
                     return result
             time.sleep(0.025)
         with self.guard:
@@ -1661,7 +1677,7 @@ class Runtime:
                 output.write(result.pop('image'))
             return {**result, 'path': relative, 'dry_run': False}
 
-    def _capture_bytes(self, request_id):
+    def _capture_bytes(self, request_id, capture=None):
         path = self._file('capture_' + request_id + '.png')
         try:
             if path.stat().st_size > 64 * 1024 * 1024:
@@ -1669,9 +1685,20 @@ class Runtime:
             with Image.open(path) as picture:
                 if picture.format != 'PNG' or picture.width * picture.height > 16 * 1024 * 1024:
                     raise ValueError('截图格式或尺寸不受支持')
+                if capture is not None:
+                    size = capture.get('raw_size') if isinstance(capture, dict) else None
+                    if (not isinstance(size, list) or len(size) != 2
+                            or any(type(value) not in (int, float) or not 1 <= value <= 16777216
+                                   or value != int(value) for value in size)
+                            or size != list(picture.size)):
+                        raise ValueError('截图尺寸与GML完整窗口范围不一致，拒绝返回可能裁切的画面：'
+                                         + str(list(picture.size)) + '，请求=' + str(size))
+                    capture.update(dimensions_verified=True, preview_size=list(picture.size), resized=False)
                 if picture.width <= 1280 and picture.height <= 720:
                     return path.read_bytes()
                 picture.thumbnail((1280, 720))
+                if capture is not None:
+                    capture.update(preview_size=list(picture.size), resized=True)
                 output = io.BytesIO()
                 picture.convert('RGB').save(output, format='PNG')
                 return output.getvalue()

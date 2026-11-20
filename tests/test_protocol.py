@@ -49,8 +49,8 @@ class ProtocolTests(ProjectFixture):
                     self.assertEqual(init.serverInfo.name, 'morx-gms2-mcp')
                     self.assertLessEqual(len(init.instructions or ''), 80)
                     tools = (await session.list_tools()).tools
-                    self.assertEqual(len(tools), 76)
-                    self.assertTrue({'inspect_sprite', 'configure_sprite', 'set_sprite_animation',
+                    self.assertEqual(len(tools), 105)
+                    self.assertTrue({'import_android_splash', 'inspect_sprite', 'configure_sprite', 'set_sprite_animation',
                                      'set_game_variables', 'spawn_game_instance',
                                      'destroy_game_instance', 'remove_object_event',
                                      'import_font', 'inspect_sound', 'configure_sound'}.issubset({tool.name for tool in tools}))
@@ -78,6 +78,23 @@ class ProtocolTests(ProjectFixture):
                     self.assertTrue(failed.isError)
                     failure = json.loads(failed.content[0].text)
                     self.assertEqual(failure['error']['tool'], 'game_request_status')
+                    moved = await call('move_resource', {'name': 'spr_protocol', 'group': '精灵/fx/battle'})
+                    self.assertEqual(moved['group_plan'], {'target': '精灵/fx/battle', 'exists': False,
+                                                         'new_groups': ['精灵/fx', '精灵/fx/battle']})
+                    bad_group = await session.call_tool('ensure_group', arguments={'group': 'folders/声音/sfx.yy'})
+                    self.assertTrue(bad_group.isError)
+                    self.assertIn("IDE 逻辑路径 '声音/sfx'", json.loads(bad_group.content[0].text)['error']['message'])
+                    batch = {'moves': [{'name': 'spr_protocol', 'group': '美术/fx'}],
+                             'remove_groups': ['精灵']}
+                    planned = await call('organize_resource_groups', batch)
+                    self.assertEqual(planned['new_groups'], ['美术', '美术/fx'])
+                    batch.update(expected_plan_sha256=planned['plan_sha256'], dry_run=False)
+                    if writable:
+                        updated = await call('organize_resource_groups', batch)
+                        self.assertEqual(updated['remove_groups'], ['精灵'])
+                        await call('restore_backup', {'transaction_id': updated['transaction'], 'dry_run': False})
+                    else:
+                        await call('organize_resource_groups', batch, True)
                     export_info = await call('inspect_windows_export', {})
                     export_args = {'expected_sha256': export_info['sha256'], 'product': '测试产品', 'version': '1.2.3.4', 'company': ''}
                     self.assertTrue((await call('configure_windows_export', export_args))['dry_run'])

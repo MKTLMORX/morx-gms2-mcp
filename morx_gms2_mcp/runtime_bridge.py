@@ -18,6 +18,8 @@ def sources(key):
         raise ValueError('无效桥接标识')
     create = MARKER + key + '\n' + r'''
 mcp_directory = "morx_mcp/";
+// Android 的相对读取可能先查 APK assets；读写统一固定到应用存档区。
+if (os_type == os_android) mcp_directory = game_save_id + "morx_mcp/";
 mcp_session = undefined;
 mcp_read_json = function(_name) {
     var _path = mcp_directory + _name;
@@ -164,9 +166,12 @@ mcp_write = function(_name,_value) {
     if (!array_contains(mcp_write_pending,_name)) array_push(mcp_write_pending,_name);
     mcp_flush_writes();
 };
-mcp_reply = function(_request,_ok,_data) {
+mcp_heartbeat = function(_activity) {
     mcp_write("ready.json",{session:mcp_session.session,bridge:mcp_session.bridge,frame:mcp_frame,
-        bridge_io:mcp_io_snapshot(),activity:{request:_request,state:"completed"}});
+        channel:"gml_file",protocol:2,storage:"game_save_id",bridge_io:mcp_io_snapshot(),activity:_activity});
+};
+mcp_reply = function(_request,_ok,_data) {
+    mcp_heartbeat({request:_request,state:"completed"});
     mcp_write("response.json",{session:mcp_session.session,request:_request,
         ok:_ok,data:_data,frame:mcp_frame});
 };
@@ -335,7 +340,7 @@ try {
             _exception.script,_exception.line,_exception.stacktrace);
     });
 } catch (err) {}
-mcp_write("ready.json",{session:mcp_session.session,bridge:mcp_session.bridge,frame:0,bridge_io:mcp_io_snapshot()});
+mcp_heartbeat({state:"starting"});
 '''.replace('__KEY__', key)
     begin = r'''
 mcp_frame++;
@@ -365,7 +370,7 @@ if (!is_undefined(mcp_pending) && mcp_frame>=mcp_until) {
     mcp_pending = undefined;
 }
 if ((mcp_frame mod 60) == 0) {
-    mcp_write("ready.json",{session:mcp_session.session,bridge:mcp_session.bridge,frame:mcp_frame,bridge_io:mcp_io_snapshot()});
+    mcp_heartbeat({state:"idle"});
 }
 if (!file_exists(mcp_directory+"request.json")) exit;
 var request;
@@ -380,6 +385,10 @@ try {
         mcp_reply(request.request,false,{error:"Another command is pending"}); exit;
     }
     switch (request.command) {
+        case "ping":
+            mcp_reply(request.request,true,{channel:"gml_file",protocol:2,bridge:mcp_session.bridge,
+                storage:"game_save_id",frame:mcp_frame});
+            break;
         case "mouse_trace":
             if (request.args.phase == "begin") {
                 var trace_button = request.args.button;
@@ -646,8 +655,7 @@ try {
             mcp_until = mcp_frame + request.args.frames;
             break;
         case "event":
-            mcp_write("ready.json",{session:mcp_session.session,bridge:mcp_session.bridge,frame:mcp_frame,
-                bridge_io:mcp_io_snapshot(),activity:{request:request.request,state:"executing"}});
+            mcp_heartbeat({request:request.request,state:"executing"});
             var ev_name = request.args.object_name;
             var ev_source = asset_get_index(ev_name);
             if (ev_source == -1) {
@@ -708,8 +716,19 @@ try {
     draw = r'''
 if (!is_undefined(mcp_capture)) {
     try {
-        screen_save(mcp_directory+"capture_"+mcp_capture+".png");
-        mcp_reply(mcp_capture,true,{frame:mcp_frame});
+        var capture_width = floor(window_get_width());
+        var capture_height = floor(window_get_height());
+        if (capture_width<1 || capture_height<1 || capture_width*capture_height>16777216) {
+            mcp_reply(mcp_capture,false,{error:"Capture dimensions out of range"});
+            mcp_capture = undefined; exit;
+        }
+        // screen_save 默认取 application surface，宽高可能仍沿用旧的宽高比。
+        screen_save_part(mcp_directory+"capture_"+mcp_capture+".png",0,0,capture_width,capture_height);
+        mcp_reply(mcp_capture,true,{frame:mcp_frame,capture:{source:"gml_screen_save_part",
+            raw_size:[capture_width,capture_height],window_size:[capture_width,capture_height],
+            gui_size:[display_get_gui_width(),display_get_gui_height()],
+            application_surface_size:surface_exists(application_surface)
+                ? [surface_get_width(application_surface),surface_get_height(application_surface)] : undefined}});
     } catch (err) {
         mcp_record_error("capture",err.message,err.longMessage,err.script,err.line,err.stacktrace);
         mcp_reply(mcp_capture,false,{error:"Capture failed: "+mcp_text(err.message,512)});

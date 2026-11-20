@@ -16,6 +16,107 @@ import tests.test_runtime as fixtures
 
 
 class ResourceFeedbackTests(core.ProjectFixture):
+    def test_batch_group_move_remove_and_restore_with_one_scan_and_transaction(self):
+        self.project.create('scripts', 'scr_one', 'x = 1;', group='旧组/战斗')
+        self.project.create('scripts', 'scr_two', 'x = 2;', group='旧组/音效')
+        files = ['test.yyp', 'test.resource_order', 'scripts/scr_one/scr_one.yy',
+                 'scripts/scr_two/scr_two.yy', 'scripts/scr_one/scr_one.gml', 'scripts/scr_two/scr_two.gml']
+        before = self.project.snapshot(files)
+        moves = [{'name': 'scr_one', 'group': '新组/fx'}, {'name': 'scr_two', 'group': '新组/fx'}]
+        remove = ['旧组', '旧组/音效', '旧组/战斗']
+        count = len(self.project.transactions())
+        with patch.object(self.project, 'transactions', wraps=self.project.transactions) as scan:
+            preview = self.project.organize_resource_groups(moves, remove)
+            scan.assert_not_called()
+            self.assertIsNone(preview['transaction'])
+            self.assertEqual(preview['new_groups'], ['新组', '新组/fx'])
+            self.assertEqual(preview['remove_groups'], ['旧组/音效', '旧组/战斗', '旧组'])
+            self.assertEqual(self.project.snapshot(files), before)
+            result = self.project.organize_resource_groups(moves, remove, preview['plan_sha256'], False)
+            scan.assert_called_once_with()
+        self.assertEqual(len(self.project.transactions()), count + 1)
+        updated = self.project.snapshot(files)
+        self.assertEqual(set(result['changed']), set(files[:4]))
+        self.assertEqual([updated[p] for p in files[4:]], [before[p] for p in files[4:]])
+        self.assertTrue(self.project.validate()['ok'])
+        self.assertEqual(self.project.read(files[2])['parent']['path'], 'folders/新组/fx.yy')
+        self.assertEqual({r['path'] for r in self.project.read('test.resource_order')['FolderOrderSettings']},
+                         {'folders/新组.yy', 'folders/新组/fx.yy'})
+        self.project.restore(result['transaction'], dry_run=False)
+        self.assertEqual(self.project.snapshot(files), before)
+
+    def test_batch_group_rejects_partial_changes_and_stale_previews(self):
+        self.project.create('scripts', 'scr_one', group='旧组/剩余')
+        self.project.create('scripts', 'scr_two', group='旧组/剩余')
+        self.project.ensure_group('待清理')
+        files = ['test.yyp', 'test.resource_order', 'scripts/scr_one/scr_one.yy', 'scripts/scr_two/scr_two.yy']
+        before = self.project.snapshot(files)
+        moves = [{'name': 'scr_one', 'group': '新组'}]
+        with self.assertRaisesRegex(ValueError, '未列入清理的子组'):
+            self.project.organize_resource_groups(moves, ['旧组'])
+        with self.assertRaisesRegex(ValueError, '仍有资源 scr_two'):
+            self.project.organize_resource_groups(moves, ['旧组/剩余'])
+        with self.assertRaisesRegex(ValueError, '请先预览'):
+            self.project.organize_resource_groups(moves, dry_run=False)
+        for invalid in ([*moves, {'name': 'scr_one', 'group': '其它'}],
+                        [*moves, {'name': 'scr_two', 'group': 'folders/新组.yy'}]):
+            with self.assertRaises(ValueError):
+                self.project.organize_resource_groups(invalid)
+        preview = self.project.organize_resource_groups(moves, ['待清理'])
+        self.assertEqual(self.project.snapshot(files), before)
+        self.project.path(files[3]).write_bytes(before[files[3]] + b'\n')
+        external = self.project.snapshot(files)
+        with self.assertRaisesRegex(ValueError, '重新预览'):
+            self.project.organize_resource_groups(moves, ['待清理'], preview['plan_sha256'], False)
+        self.assertEqual(self.project.snapshot(files), external)
+
+    def test_batch_group_pending_transaction_blocks_writes_but_not_preview(self):
+        self.project.ensure_group('待清理')
+        tx = self.project.transactions()[0]['id']
+        rel, manifest = self.project._manifest(tx)
+        manifest['status'] = 'recovery_required'
+        self.project.path(rel).write_bytes(encode(manifest))
+        before = self.project.yyp.read_bytes()
+        preview = self.project.organize_resource_groups(remove_groups=['待清理'])
+        with self.assertRaisesRegex(ValueError, '未完成事务'):
+            self.project.organize_resource_groups(remove_groups=['待清理'],
+                expected_plan_sha256=preview['plan_sha256'], dry_run=False)
+        self.assertEqual(self.project.yyp.read_bytes(), before)
+        self.assertEqual(len(self.project.transactions()), 1)
+
+    def test_group_tool_rejects_internal_paths_without_changes(self):
+        self.project.create('scripts', 'scr_demo', group='精灵/fx/battle')
+        self.project.ensure_group('声音/sfx')
+        before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        for logical in ('精灵/fx/battle', '声音/sfx'):
+            group = self.project.ensure_group(logical, dry_run=True)
+            self.assertEqual(group['changed'], [])
+            self.assertEqual(group['group_plan'], {'target': logical, 'exists': True, 'new_groups': []})
+            for raw in (f'folders/{logical}.yy', f'Folders/{logical}.YY'.replace('/', '\\')):
+                for dry_run in (True, False):
+                    with self.subTest(group=raw, dry_run=dry_run):
+                        with self.assertRaises(ValueError) as error:
+                            self.project.move_resource('scr_demo', raw, dry_run=dry_run)
+                        self.assertIn(repr(raw), str(error.exception))
+                        self.assertIn(repr(logical), str(error.exception))
+        self.assertEqual(before, {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+
+    def test_group_plan_lists_only_missing_groups_in_parent_order(self):
+        self.project.ensure_group('精灵')
+        self.project.create('scripts', 'scr_demo', group='脚本')
+        target = '精灵/fx/battle'
+        changed_paths = ['test.yyp', 'test.resource_order', 'scripts/scr_demo/scr_demo.yy']
+        before = self.project.snapshot(changed_paths)
+        preview = self.project.move_resource('scr_demo', target, dry_run=True)
+        expected = {'target': target, 'exists': False, 'new_groups': ['精灵/fx', target]}
+        self.assertEqual(preview['group_plan'], expected)
+        self.assertEqual(self.project.snapshot(changed_paths), before)
+        self.assertIsNone(preview['transaction'])
+        self.assertEqual(self.project.move_resource('scr_demo', target)['group_plan'], expected)
+        repeat = self.project.move_resource('scr_demo', target, dry_run=True)
+        self.assertEqual(repeat['changed'], [])
+        self.assertEqual(repeat['group_plan'], {'target': target, 'exists': True, 'new_groups': []})
+
     def test_empty_group_preview_remove_conflict_and_restore(self):
         self.project.ensure_group('art/unused')
         info = self.project.validate()

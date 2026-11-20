@@ -30,7 +30,7 @@ class RuntimePool:
                 raise ValueError('存在多个会话，必须明确 session_id；查询 list_game_sessions')
             return active[0] if active else next(reversed(self.sessions.values()), self.idle)
 
-    def run(self, dry_run=True, compile_only=False, new_session=False, launch_mode='igor'):
+    def run(self, dry_run=True, compile_only=False, new_session=False, launch_mode='igor', expected_transactions=None):
         if type(new_session) is not bool:
             raise ValueError('new_session 须为布尔值')
         with self.guard:
@@ -45,7 +45,7 @@ class RuntimePool:
             rt = Runtime(self.project, self.options)
             rt.build_gate = self.build_gate
             if not dry_run:
-                result = rt.run(False, compile_only, launch_mode)
+                result = rt.run(False, compile_only, launch_mode, expected_transactions)
                 self.sessions[result['session_id']] = rt
                 # 有界历史，不移除尚有进程、待清理目录或运行中测试的会话。
                 for sid, old in list(self.sessions.items()):
@@ -54,7 +54,8 @@ class RuntimePool:
                     if old.session.get('stopped') and not old.session.get('stopping') and not old.session.get('cleanup_failed') and not old.tests.active:
                         del self.sessions[sid]
                 return {**result, 'new_session': new_session, 'build_concurrency': 1}
-        return {**rt.run(True, compile_only, launch_mode), 'new_session': new_session, 'max_sessions': 8}
+        return {**rt.run(True, compile_only, launch_mode, expected_transactions),
+                'new_session': new_session, 'max_sessions': 8}
 
     def status(self, wait_seconds=0, session_id=None):
         return self.target(session_id).status(wait_seconds)

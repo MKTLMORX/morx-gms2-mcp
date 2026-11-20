@@ -6,7 +6,7 @@
 
 ## 工具清单
 
-共 76 个工具。先按工具名发现所需接口，再查看该接口的参数，避免把整套声明打印进上下文。公共流程由 `server_info.usage` 返回，初始化只保留入口提示。参数类型与默认值可由 MCP 客户端查询；以下说明常用流程和限制。
+共 105 个工具。先按工具名发现所需接口，再查看该接口的参数，避免把整套声明打印进上下文。公共流程由 `server_info.usage` 返回，初始化只保留入口提示。参数类型与默认值可由 MCP 客户端查询；以下说明常用流程和限制。
 
 | 工具 | 功能 |
 | --- | --- |
@@ -28,7 +28,7 @@
 | `get_runtime_errors` | 读取未处理异常和桥接命令错误 |
 | `game_request_status` | 查询原请求状态和结果，不重放事件 |
 | `save_game_capture` | 导出预览 PNG 到项目固定目录，不覆盖已有文件 |
-| `capture_game` | 从游戏 DrawGUIEnd 获取 PNG 画面 |
+| `capture_game` | 从 DrawGUIEnd 取完整窗口 PNG，核对原图并报告预览尺寸 |
 | `inspect_game` | 读取房间、窗口、GUI、实例变量或全局变量；数组和结构体受深度与数量限制 |
 | `set_game_variables` | 按名称写入实例或全局变量，返回旧值；可限制目标实例数 |
 | `spawn_game_instance` | 在当前房间按物体名创建实例，可指定图层或 depth |
@@ -46,6 +46,34 @@
 | `inspect_windows_export` | Windows 导出元信息、配置/图标哈希与配置覆盖 |
 | `configure_windows_export` | 配置 EXE 名、版本、Unicode 元信息及项目内图标引用 |
 | `import_windows_icon` | 导入 ICO 或从 PNG 生成多尺寸 ICO，图标与配置单事务 |
+| `inspect_android_export` | 查询 Android 原生设置、包名、方向、ABI、权限、图标与启动图 |
+| `configure_android_export` | 组合校验并按哈希修改 Android 原生选项 |
+| `import_android_icons` | 从项目内 PNG 生成六密度传统及自适应图标，单事务 |
+| `import_android_splash` | 导入横屏或竖屏启动图，可同时配置比例、边框色和显示时长 |
+| `inspect_android_toolchain` | 发现 SDK/NDK/JDK、版本、路径来源及缺失项 |
+| `configure_android_toolchain` | 保存项目专属的工具链、缓存及输出目录引用 |
+| `inspect_android_signing` | 查询签名材料状态，可核对别名及公开证书摘要 |
+| `configure_android_signing` | 引用已有 keystore 和口令环境变量名称 |
+| `create_android_development_signing` | 创建独立开发签名，口令由当前用户 DPAPI 保护 |
+| `build_package` | 异步提交隔离 Android APK/AAB Package 任务 |
+| `build_status` | 查询原构建阶段、进度、期限与结果，不重新构建 |
+| `get_build_output` | 按游标读取受管构建日志，限制数量并过滤签名值 |
+| `cancel_build` | 取消排队或活动构建，保留已交付成品 |
+| `cleanup_build` | 重试已结束任务的临时文件清理，保留成品 |
+| `inspect_android_package` | 用官方工具验证 APK/AAB 元数据、格式和签名 |
+| `inspect_extension` | 分页检查原生 Android Java/GML 扩展、源清单及注入 |
+| `create_extension` | 从项目内 Java 和函数声明创建 Android 原生扩展定义 |
+| `import_extension` | 双哈希保护导入用户准备的原生扩展并登记资源 |
+| `list_android_devices` | 查询 ADB 设备、授权状态、型号、API 和 ABI |
+| `install_android_package` | 核对版本和签名后安装 APK，升级保留数据 |
+| `run_android_game` | 启动明确设备和包，建立有期限的受管会话 |
+| `android_game_status` | 查询 Android 会话、PID 和开发桥接就绪状态 |
+| `stop_android_game` | 停止原受管进程并释放触点，保留数据 |
+| `android_game_lifecycle` | 受管应用切后台及恢复 |
+| `send_android_input` | 旋转后显示像素坐标的真实单指输入及返回键 |
+| `inspect_android_game` | 开发桥接读取房间、输入和指定变量 |
+| `capture_android_game` | 开发包自身画面与原始尺寸、密度和旋转 |
+| `get_android_logs` | 有界、脱敏的目标 PID 日志和异常分类 |
 | `configure_windows_display` | 显示名称、启动全屏、边框、大小调整许可等 Windows 选项 |
 | `configure_room_display` | 独立调整房间大小、一个相机及其视口 |
 | `remove_empty_group` | 项目哈希保护清理空分组及排序项，拒绝非空组 |
@@ -56,6 +84,7 @@
 | `remove_object_event` | 删除已有事件及其 GML 文件，保留物体 |
 | `configure_object` | 常驻、可见、精灵及父物体引用 |
 | `move_resource` | 调整虚拟分组，保持磁盘原生目录 |
+| `organize_resource_groups` | 一次预览、提交和撤销批量资源归类及空组清理 |
 | `delete_resource` | 删除未被引用的资源及文件，走事务备份 |
 | `rename_resource` | 重命名资源、移动文件并更新资源引用 |
 | `create_room` | 创建房间与 Instances 图层 |
@@ -107,6 +136,10 @@
 修改代码或资源不会停止、清理或刷新已运行的隔离副本。需要验证最新源码时，新建快照运行；`restart_game` 仍使用原快照。
 
 每次写入都会在 `.codex/gms2-resource-backups/` 保存备份。用 `list_backups` 查询事务，再将 `transaction_id` 传给 `restore_backup`，预览或执行撤销。恢复须从最新未撤销事务开始；发现后续外部改动会拒绝覆盖。撤销新建操作会移除其新建文件。备份包含项目代码、素材和本机路径，不应上传到公共仓库。
+
+成功写入会返回 `readback_verified`。如果回读发现文件被外部保存覆盖，工具返回 `write_conflict`、具体文件和事务号，磁盘版本与事务备份都会保留。`list_backups` 可查看冲突记录。
+
+`compile_game`、`run_game` 和 Android `build_package` 默认复核本次 MCP 服务写过的项目文件，以每个文件最后一次写入为准。重连后或只想验证指定一批时，按提交顺序传入 `expected_transactions`。发现源文件或实际快照与预期不符时，工具报告 `source_conflict` 和文件路径，停止启动编译器。后台检查的详情见 `runtime_status.preparation.preparation_error` 或 `build_status.error`。核对并确认采用当前磁盘版后，可显式传 `expected_transactions=[]` 编译当前内容。
 
 工具执行异常返回 `isError=true`，文本为可解析的 `{"ok":false,"error":{...}}`，同时提供 MCP 结构化内容；包括工具名、异常类型、错误代码、信息及诊断编号。运行请求错误还提供原会话/请求编号、是否执行结果未知，`runtime_status.last_request_error` 保留最近一次诊断。**先判断 `isError`，再尝试解析内容**：SDK 的参数或协议校验错误仍可能是普通文本，不应对所有返回直接 `JSON.parse`。错误不代表副作用已回滚，不能据此自动重放事件或输入。
 
@@ -215,6 +248,14 @@ install_runtime_bridge → run_game → runtime_status → capture_game / inspec
 
 排队也可取消，准备线程退出后才清理。一个会话失败不会替换其他会话，旧编号不重新分配。保留最多32条历史会话（只淘汰已停止且清理完成、测试已结束的记录），重要日志和报告须先导出。接口上限不代表已在本机实测8个客户端的负载。
 
+### 异步保存、加载与系统事件
+
+`AsyncSaveLoad`（Other / 72）和 `AsyncSystem`（Other / 75）支持 `add_object_event`、`read_code`、`update_code`、`remove_object_event` 的统一事件身份，调用时 `number=0`。`server_info.async_events` 公布原生编号。创建默认仅预览，已有事件拒绝覆盖；更新仍需读取到的 SHA256。
+
+保存和加载完成后，在 `AsyncSaveLoad` 中读取 `async_load[? "id"]` 与 `async_load[? "status"]`，将回调对应到原请求；不能以文件出现代替完成通知。系统事件的数据按对应平台回调读取。这些事件只接收真实回调，`trigger_game_event` 和测试序列均拒绝手动触发。参见[官方 Save / Load 说明](https://manual.gamemaker.io/monthly/en/The_Asset_Editors/Object_Properties/Async_Events/Save_Load.htm)。
+
+Save / Load 也接收音频组加载通知；这类通知提供 `type` 和 `group_id`。处理 buffer 回调前先用 `ds_map_exists(async_load, "id")` 区分，避免将音频通知当作存档请求。
+
 ### Networking 事件
 
 `add_object_event` 使用标准名 `AsyncNetworking`，兼容别名 `Networking`，number保持0。创建、读取、哈希更新与移除均使用同一身份（Other / 68），别名不能重复添加。`create_object` 只创建物体，随后单独添加事件。
@@ -303,7 +344,7 @@ GUI 模式按整个客户区比例换算；项目若自行设置 GUI 偏移、�
 | 项目副本 | 复制到用户本地数据目录（默认 `%LOCALAPPDATA%`）的 `_morx_runs/<session>`，默认按登记依赖收集，额外依赖可配置；拒绝链接和目录联接，每份限制 100000 文件或 2 GiB |
 | 存档 | 使用 `MORX_Run_<session>` 独立存档目录；源项目的显示设置和存档不受运行影响 |
 | 通信 | 通过存档目录中的 JSON 文件请求/应答，无 HTTP/TCP 监听；旧会话和旧请求 ID 会被拒绝 |
-| 画面 | `capture_game` 从游戏 `DrawGUIEnd` 保存 PNG，预览最长边界 1280×720；不抓取桌面 |
+| 画面 | `capture_game` 在 `DrawGUIEnd` 显式保存完整窗口范围，核对 PNG 尺寸后等比缩至 1280×720 内；不抓取桌面 |
 | 日志 | 异步收集、有限环形缓冲，隐藏凭据相关行并脱敏本机路径 |
 | 生命周期 | 最多8个活动/待清理会话；每次启动最长15分钟（含准备/编译）；只停止目标会话的受管进程及子进程 |
 | 清理 | 停止、过期或启动失败会尝试删除构建副本与存档目录；`stop_game` 的 `cleaned` 和逐目录 `cleanup` 返回实际结果 |
@@ -317,8 +358,10 @@ GUI 模式按整个客户区比例换算；项目若自行设置 GUI 偏移、�
 - `run_game_sequence` 的 `state` 步骤也支持 `max_depth=1～8`，与单次 `inspect_game` 一致。
 - 枚举及 64 位整数可正常读取。超出 ±9007199254740991 的整数以 `{"type":"int64","value":"十进制整数"}` 返回，避免客户端数值舍入；该结构是读取结果，不是写入指令。
 - `spawn_game_instance` / `destroy_game_instance` 只作用于当前房间；生成可指定现有图层或 depth，销毁会触发引擎事件，但不会自动清理项目代码中的外部引用。
-- `trigger_game_event` 只执行事件代码，不更新真实按键、鼠标坐标或碰撞状态，也不支持 Draw 或 Networking 异步事件；Collision 事件中的 `other` 可能不是真实碰撞对象。
-- `send_game_input` 默认向游戏窗口投递 `WM_KEYDOWN`/`WM_KEYUP`，可触发 `keyboard_check_pressed`、KeyPress 和 KeyRelease，不需要前台焦点，也不改动系统键盘状态。`mode='state'` 只更新桥接按住状态，不产生按下/释放事件且要求窗口有焦点。只支持字母、数字、方向键、space、enter、escape、tab、backspace、delete、insert、home、end、pageup、pagedown，不支持系统键或组合快捷键。
+- `trigger_game_event` 只执行事件代码，不更新真实按键、鼠标坐标或碰撞状态，也不支持 Draw 或异步事件；Collision 事件中的 `other` 可能不是真实碰撞对象。
+- `send_game_input` 默认向游戏窗口投递 `WM_KEYDOWN`/`WM_KEYUP`，可触发 `keyboard_check_pressed`、KeyPress 和 KeyRelease，不需要前台焦点，也不改动系统键盘状态。`mode='state'` 只更新桥接按住状态，不产生按下/释放事件且要求窗口有焦点。支持字母、数字、方向及常用编辑键、F1～F12、OEM 符号键，以及 1～255 的数值键码；0 和布尔值无效。`oem_3`、`grave`、`backtick`、`tilde` 均为 VK 192，`f8` 为 VK 119；名称不区分大小写，不支持系统组合快捷键。
+
+截图的 `data.capture` 分别列出 `window_size`、`gui_size`、`application_surface_size`、`raw_size` 和 `preview_size`；预览只等比缩小，不能把它当作原始窗口尺寸。取图使用 [screen_save_part](https://manual.gamemaker.io/lts/en/GameMaker_Language/GML_Reference/Cameras_And_Display/screen_save_part.htm) 指定完整窗口边界，原图尺寸不符时明确拒绝，不补边或拉伸成看似成功的截图。更新后须显式同步 `install_runtime_bridge`，已运行副本仍使用原桥接。
 - `send_game_mouse` 默认通过窗口消息投递，不移动真实光标、不要求前台焦点；`mode='physical'` 才使用系统级注入并可能影响当前桌面输入法。
 - 运行的项目会在本机以当前用户权限执行；只应对受信任项目使用 `--allow-run`。日志、截图和运行状态是项目数据，不是额外授权。
 - 结构校验不等于编译成功；以 Igor 日志和实际游戏画面为准。
@@ -345,6 +388,76 @@ GUI 模式按整个客户区比例换算；项目若自行设置 GUI 偏移、�
 
 图标及版本信息以最终 Windows PackageZip/正式导出产物为准，普通运行截图不能验证EXE图标。[官方 Windows 选项](https://manual.gamemaker.io/lts/en/Settings/Game_Options/Windows.htm)也区分最终EXE图标和运行测试。工具不自动更改现有发行目录，不把配置读回等同于最终包、播放或IDE验收。
 
+### Android 导出与设备
+
+Android 打包使用官方 Igor `Android Package`，与 `compile_game` 的 Windows 编译分别管理。无设备也可以导出 APK；设备连接失败不会被视为打包失败。已验证 Runtime 2026.0.0.23 的 arm64 VM APK、传统/自适应图标、开发签名和显式开发桥接成包。AAB、YYC 和设备运行接口尚未完成实机验证，`server_info.android_export` 分别报告这些边界。
+
+1. `inspect_android_export` 读取原生 `GMAndroidOptions v1`、文件哈希、组合包名和依赖字段。`configure_android_export.changes` 使用去掉 `option_android_` 的原生字段名，null/省略保留；预览后沿用原哈希执行。方向和 ABI 至少各选一项，权限只修改指定项，不联动 GML 版本或游戏注册规则。
+2. `inspect_android_toolchain` 检查本机 Runtime/Igor、SDK/NDK/JDK、API、Build Tools、Gradle 发行缓存和路径来源。发现不只依赖 PATH；明确配置的错误路径不会被回退掩盖。空依赖字段尚无法确认继承值时会阻止构建，需显式配置；缓存是否包含全部依赖仍以构建为准。`configure_android_toolchain` 只保存项目本地路径引用，不修改 IDE、系统 Java 或自动安装 SDK/NDK。
+3. 用 `create_android_development_signing` 显式创建一次独立开发签名，之后复用；口令由当前 Windows 用户 DPAPI 保存。正式签名用 `configure_android_signing` 引用项目外已有 keystore、别名及口令环境变量**名称**；不传口令值，不自动轮换。`inspect_android_signing(verify_certificate=true)` 可检查别名与公开证书摘要。
+4. 调用 `build_package` 预览明确输出目录，确认后 `dry_run=false` 立即获得 `job_id`。用 `build_status` 查询、`get_build_output(after,limit)` 读取有界日志；不重复发起构建。最长 7200 秒包含排队、复制和验证，与 Windows 共用编译队列。首次下载缺失 Gradle 依赖须显式 `allow_downloads=true`；保留当前进程 `GRADLE_OPTS`，但最终强制禁用 SDK 自动下载。此开关不会安装缺失 SDK/NDK；未授权下载时保守拒绝提交。
+5. 最终 APK 通过 aapt2 和 apksigner，AAB 通过已配置的 bundletool、jarsigner/keytool，返回实际包名、版本、SDK、ABI、权限、签名、体积和 SHA256。AAB 不能直接安装。覆盖旧成品要传旧文件哈希；失败不替换原文件。`cancel_build` 取消自己的任务，`cleanup_build` 可重试终态临时副本清理，均保留已交付成品。
+
+输出必须位于项目配置的 `export_root` 内；`build_root` 可放在空间充足的磁盘。副本按已登记依赖生成，不复制 SDK、全量 Gradle 缓存或签名材料，预览给出源字节数、磁盘余量与构建余量估计。任务状态保存源清单摘要；成品位置与构建临时副本分开。
+
+Windows 下 AGP 要求隔离项目路径为 ASCII。若默认 `build_root` 因用户名含中文等字符而不兼容，预检会返回 `non_ascii_build_root` 并阻止提交；可显式配置为如 `D:/GameBuilds/Android`，原项目可留在原位置。工具不注入 `overridePathCheck`。另需注意，`gamepad_support=true` 仍可能加入蓝牙权限，即使 `permission_bluetooth=false`；查询、配置预览及工具链返回 `permission_notes`，是否关闭手柄由调用者决定，最终权限以成包检查为准。
+
+`import_android_icons` 从项目内 PNG 生成六种密度的传统及自适应图标，配置与 18 张图像单事务。`inspect_extension` 可分页检查准备好的原生 Android Java/GML 扩展；`import_extension` 用源清单和项目双哈希导入，保留伴随文件和原生版本标记，并按原生顺序整理描述字段。首轮支持空标记 `GMExtension 2.0`、Java 占位函数及显式 `function` 声明的 GML 文件；拒绝外部源码目录、自动初始化/结束和代理文件。签名/引用/Manifest 检查不代替原生编译；只导入可信扩展。平台适配由扩展自身实现，工具不生成或伪造设备标识。
+
+#### Android 启动图
+
+`import_android_splash` 接受项目内不透明的 24 位 RGB PNG，单张最多 16 MiB，单边最多 4096 像素。可同时导入两个方向，也可只替换其中一个，源图片保持原样。`expected_sha256` 取自 `inspect_android_export`。
+
+```json
+{"landscape_path":"art/start-wide.png","portrait_path":"art/start-tall.png","expected_sha256":"<Android 配置哈希>","changes":{"launchscreen_fill":0,"splashscreen_background_colour":"#1234AB","splash_time":3},"dry_run":true}
+```
+
+`launchscreen_fill` 的 `0` 保持比例，`1` 裁切，`2` 拉伸。边框色可用 `#RRGGBB`，显示时长为 0～10 秒的整数，`0` 表示只显示到加载完成。只需要调整显示设置时，把同样的 `changes` 传给 `configure_android_export`。具体显示行为参见 [GameMaker Android 选项](https://manual.gamemaker.io/lts/en/Settings/Game_Options/Android.htm#images)。
+
+提交导入时，把预览中每项 `source_path` 和 `source_sha256` 填入 `expected_sources`。覆盖已有目标时，把目标 `path` 和 `before_sha256` 填入 `expected_splash_hashes`。传入相同的待改设置和 `dry_run=false`。图片和配置可用一个事务撤销，修改后需重新构建 APK。
+
+#### 从 Java 创建扩展定义
+
+只有 Java 源时，可用 `create_extension` 生成原生定义，无需手写 `.yy` 或先进入 IDE。`sources` 是绑定项目内明确的 Java 相对路径，不隐式复制整个目录。工具按已验证的结构生成 `GMExtension 2.0` 空版本标记、Generic 占位声明及函数，再把 Java 原字节复制至扩展的 `AndroidSource/Java/`；不生成或改写 Java 实现，不整理其他资源的字段。
+
+先用 `inspect_project` 取得 `project_sha256`，再预览：
+
+```json
+{"name":"NativePlatform","android_class":"NativePlatform","sources":["art/android/NativePlatform.java"],"functions":[{"name":"native_platform_snapshot","external_name":"native_platform_snapshot","args":[],"return_type":"string","help":"native_platform_snapshot()"}],"targets":["Android"],"group":"扩展","expected_project_sha256":"<project_sha256>","dry_run":true}
+```
+
+`functions` 最多32项，包含唯一 GML `name`、默认同名的 `external_name`、最多16项的 `args`、必填 `return_type` 和可选 `help`。参数/返回类型使用 `string` 或 `real`，零参数为 `[]`；它们分别映射原生类型1/2。声明须与登记类文件中的公开 Java 方法匹配，辅助类或内部类的同名方法不算登记方法。继承 `ExtensionBase` 的生命周期回调可以保留在 Java 源内，工具不会将其自动登记为 GML 函数。
+
+预览返回全部新增文件、函数签名、平台掩码、分组与项目登记前后摘要，以及每份源的 SHA256 和 `manifest_sha256`。实际创建需保留参数与项目哈希，增加 `expected_manifest_sha256="<预览的 manifest_sha256>"` 并设 `dry_run=false`；缺哈希、源变化、同名资源/函数/类或既有目标文件都会拒绝，失败按同一事务回滚。原 Java 不变，之后修改扩展内的副本；需要撤销时使用返回的事务编号。
+
+首轮创建仅接受 `targets=["Android"]`，根定义与占位文件的平台掩码均为8，权限、Manifest/Gradle 注入及 Init/Final 留空。占位 `.ext` 是原生声明，不要求实际空文件。`inspect_extension(name=...)` 可分页读回 Java 源哈希、类名、函数 Help/类型和根/文件实际平台掩码；`android_only` 只在原生有效掩码确实仅 Android 时为 true。创建定义、Java/DEX 编译和手机上的平台数据行为需分别验证。
+
+#### 设备与开发包
+
+设备接口要求已有 platform-tools/ADB 和用户已授权的设备，所有操作明确 `serial`。`list_android_devices` 返回授权/离线状态、型号、API 和 ABI，不开启调试、不更改设备网络。`install_android_package` 先检查本地 APK 与目标已安装 APK 的公开元数据及签名；升级需 `allow_upgrade=true`，保留数据。签名冲突、降级或空间不足会停止，不自动卸载或清数据。
+
+`run_android_game` 只启动本服务已核对安装且当前未运行的目标包，返回独立 `session_id`，最长 900 秒。后续 `android_game_status`、`stop_android_game`、输入和读取都使用该会话。原 PID 退出或被替换后不接管新进程；`android_game_lifecycle` 明确切后台或恢复，不操作 Wi-Fi、锁屏或其他应用数据。
+
+状态和画面要求打包时显式选择 `development_bridge=true`，仅限独立 `development` 签名 APK。工具只在构建副本加入桥接和 `debuggable` 属性，成包后再次核对；普通构建默认剔除受管测试桥接，发行签名及 AAB 不接受此选项。开发桥接经 ADB `run-as` 读写固定应用沙盒文件，不开放网络端口。该包可调试，不用于正式分发。
+
+等待 `bridge_ready=true` 后，`inspect_android_game` 返回房间、输入状态和最多 16 个指定全局变量，或指定物体的实例变量；支持有界数组/结构深度。`capture_android_game` 只获取应用自身完整窗口 `screen_save_part` 画面，核对 PNG 与请求范围后返回原始尺寸、显示密度、旋转，不退回整机截图。若 Android 沙盒路径或 Runner 不兼容会明确失败；软键盘高度尚不提供，游戏像素不作为 dp 返回。
+
+Android 开发桥接协议为 2：GML 使用 `game_save_id` 的明确路径，对应 `run-as` 下的 `files/morx_mcp`。每次启动暂存一次无副作用 `ping`，状态必须同时核对当前会话/桥接、GML 协议、正帧号和匹配的握手回复，才报告就绪；仅存在 Java 心跳或 frame=0 均不足。`bridge_status.reason` 区分缺少心跳、协议不符、等待握手及超过 10 秒未观察到帧号进展。旧开发 APK 需重新构建，普通发行包不受影响。
+
+`inspect_android_package` 可读取旧开发包的元数据，`development_bridge_compatibility` 分别报告包内协议、当前支持协议与 `runtime_supported`；无桥接时该字段为 null。安装预检核对设备旧包的包名、版本和官方签名，不要求它支持当前桥接，因而协议 2 新包可以按正常升级流程保留数据覆盖协议 1 旧包。待安装/运行的候选开发包仍须支持当前协议，签名冲突、降级、哈希变化和损坏文件仍拒绝。错误前缀区分“待安装/运行APK”与“设备已安装APK”，避免误判失败来源。
+
+前台检测兼容 Android 15 的完整窗口焦点输出，字段缺失时核对 `topResumedActivity` / `mResumedActivity`。明确的空焦点、系统弹窗、其他包或多显示器冲突均拒绝输入和应用状态请求，不用后台 Activity 覆盖当前窗口焦点。
+
+显示旋转从默认显示器的完整 `DisplayInfo` 记录读取，兼容模式、HDR 等嵌套字段；优先有效显示配置，不取其他显示器或存在冲突的值。输入使用旋转后的屏幕像素，密度另列，不把像素坐标当作 dp。
+
+Android `tap` 使用同点单指按住/抬起，`duration_ms` 控制持续时间（默认 300ms，范围 1～2000ms），让按帧轮询的游戏有机会读取按下；过短时长仍可能被游戏漏读，不自动重放。`tap` / `swipe` 失败时也尝试释放触点；独立 `down` / `move` 的两秒租约保持。
+
+已用独立 Android 15 / API 35 x86_64 模拟器验证安装、启动、前台识别、GML 握手与变量读取、完整窗口截图、单指点击及停止。Windows 125% DPI 下另核对 F1/F8/F12 按下释放和非 16:9 全窗口截图；这些验证不覆盖用户手机、AAB 或 YYC。
+
+`send_android_input` 的坐标为**旋转后的主显示屏像素**，不自动换算游戏 GUI 或 dp。支持 tap、swipe、返回键；独立 down/move/up 还要求设备 `input` 支持 `motionevent`，否则可用原子 swipe。触点租期两秒，异常和停止时尝试释放；多指输入未实现。输入要求目标应用当前在前台，预览不会发送动作。
+
+`get_android_logs` 只读取目标 PID 的最近有界 logcat，以游标返回并过滤凭据相关内容，分类 Java、原生和 GML 错误；进程结束后保留本服务已采集的日志。它不导出全机日志，不自动重放超时请求。设备截图、输入、前后台恢复和实际沙盒传输仍须在授权设备上验收。
+
 ### 声音与音频组导出目录
 
 `inspect_sound` 的 `settings.export_directory` 对应声音的 `exportDir`，同时报告 `audio_group_export_directory`、`audio_group_directory_applies`、`effective_export_directory` 和来源。`effective_export_target` 为 Windows VM；存在配置覆盖时生效目录为null，不推断跨配置结果。`configure_sound(export_directory=...)` 可单独设置目录，null保留、空串回根目录，不更改源音频或其他压缩/音量参数。
@@ -365,9 +478,19 @@ Windows 中，流式声音使用自身目录；非流式自定义组按组目录
 
 瓦片查询、编辑和结构检查支持未压缩数组及 `TileDataFormat=1` 压缩数据，写回保持原编码类型。单层最多解码 4194304 格，单次查询或修改最多 10000 格；损坏编码、未知格式及超限数据会拒绝处理。
 
-### 清理空分组
+### 整理资源分组
+
+`group` 使用 IDE 中的逻辑路径，例如 `精灵/fx/battle`。传入 `folders/精灵/fx/battle.yy` 时，工具会拒绝并提示正确路径。建组、移动资源和导入资源的预览通过 `group_plan` 返回目标 `target`、目标是否已存在 `exists` 和将创建的分组 `new_groups`。新增分组按父组到子组排列。
 
 清理分组前调用 `inspect_project`，将 `project_sha256` 传给 `remove_empty_group.expected_sha256`。预览会列出直接资源、子组和排序引用；非空组执行时拒绝，不递归删除。
+
+要一批移动资源并清理移空的组，用 `organize_resource_groups`。`moves` 和 `remove_groups` 可以单独使用，合计最多 128 项。以下调用预览移动一个资源，并检查移走后原组和指定父组是否为空。
+
+```json
+{"moves":[{"name":"spr_hit","group":"精灵/fx"}],"remove_groups":["旧素材","旧素材/特效"],"dry_run":true}
+```
+
+预览返回原组、目标组、将新建和移除的分组，以及 `plan_sha256`。提交时传入相同操作、`expected_plan_sha256` 和 `dry_run=false`。如果任一组还有资源或未指定清理的子组，整批拒绝。指定的子组先于父组移除。提交前复核文件和待恢复事务，成功后用一个事务号撤销整批操作。只预览时无需扫描历史备份。
 
 ### 替换精灵图像
 
@@ -520,7 +643,8 @@ PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最
 | 精灵编辑 | 普通 `GMSprite v2` 位图连续时间轴，详见[精灵动画](#编辑已有精灵动画) |
 | 显示配置 | 已有 `GMWindowsOptions v2`，以及非继承 `GMRoom v1` 的房间、相机和视口 |
 | 运行观察 | Windows x64 VM、已登录的本机 Runtime（Igor）、Windows 项目、最多8个活动会话（构建排队） |
-| 已验证环境 | Windows，GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23，Windows VM 目标 |
+| Android | 原生配置/图标/扩展导入、隔离 Package、ADB 设备与开发桥接接口；设备实战尚未完成 |
+| 已验证环境 | Windows，GameMaker IDE 2026.0.0.16 / Runtime 2026.0.0.23，Windows VM 运行、Android arm64 VM APK 导出 |
 | 输入缩放 | 已实测 125% DPI 下多组窗口/GUI 尺寸；其他 DPI 尚未实测，自定义 GUI 偏移需显式使用 client 坐标 |
 
 
@@ -528,7 +652,7 @@ PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最
 
 - 新建项目仍在 GameMaker 中完成。资源热加载行为取决于 IDE，修改后应核对实际加载结果。
 - 资源删除要求没有其他资源引用；重命名更新资源引用和文件名，不改写 GML 中的资源名。创建工具不覆盖已有 GML 或事件，已有代码使用 `read_code` / `update_code` 修改。
-- 不提供路径、时间线、序列或扩展创建，以及 MP3 导入。精灵编辑不增删帧，不缩放、裁剪或调色 PNG；显示配置不包含其他平台和运行时 GML。
+- 不提供路径、时间线、序列、扩展源码生成或 MP3 导入；扩展需用户准备后导入。精灵编辑不增删帧，不缩放、裁剪或调色 PNG；房间显示配置不注入运行时 GML。
 - 拒绝越界路径、符号链接及目录联接；名为 `参考项目` 的目录及其子目录不能绑定。
 
 更多数据边界见[安全说明](../SECURITY.md)，版本变化见[更新记录](../CHANGELOG.md)。

@@ -49,7 +49,7 @@ class ProtocolTests(ProjectFixture):
                     self.assertEqual(init.serverInfo.name, 'morx-gms2-mcp')
                     self.assertLessEqual(len(init.instructions or ''), 80)
                     tools = (await session.list_tools()).tools
-                    self.assertEqual(len(tools), 105)
+                    self.assertEqual(len(tools), 107)
                     self.assertTrue({'import_android_splash', 'inspect_sprite', 'configure_sprite', 'set_sprite_animation',
                                      'set_game_variables', 'spawn_game_instance',
                                      'destroy_game_instance', 'remove_object_event',

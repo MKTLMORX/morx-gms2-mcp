@@ -30,6 +30,20 @@ def digest(data):
     return hashlib.sha256(data).hexdigest() if data is not None else None
 
 
+def included_file_path(relative):
+    """规范的 datafiles 内部路径，适用于登记、迁移和恢复。"""
+    from .snapshots import relative as snapshot_path
+
+    path = PurePosixPath(snapshot_path(relative))
+    devices = {'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)),
+               *(f'LPT{i}' for i in range(1, 10))}
+    if (len(path.parts) < 2 or path.parts[0] != 'datafiles'
+            or any(part.endswith((' ', '.')) or re.search(r'[<>"|\x00-\x1f]', part)
+                   or part.split('.', 1)[0].upper() in devices for part in path.parts)):
+        raise ValueError('须提供 datafiles 下的文件相对路径：' + relative)
+    return path
+
+
 class FileConflict(ValueError):
     def __init__(self, code, conflicts, transaction=None):
         names = '、'.join(row['path'] for row in conflicts[:5])
@@ -166,7 +180,7 @@ class Storage:
     def snapshot(self, names):
         return {n: self.path(n).read_bytes() if self.path(n).is_file() else None for n in names}
 
-    def _write(self, relative, data):
+    def _write(self, relative, data, *, exclusive=False):
         p = self.path(relative)
         if data is None:
             p.unlink(missing_ok=True)
@@ -185,7 +199,14 @@ class Storage:
                 file.write(data)
                 file.flush()
                 os.fsync(file.fileno())
-            replace_retry(temp, p)
+            if exclusive:
+                # Windows rename refuses an existing target. Elsewhere link does the same.
+                if os.name == 'nt':
+                    os.rename(temp, p)
+                else:
+                    os.link(temp, p)
+            else:
+                replace_retry(temp, p)
         finally:
             temp.unlink(missing_ok=True)
 
@@ -196,8 +217,13 @@ class Storage:
         data = self.read(rel)
         if data.get('project') != str(self.yyp) or data.get('version') != 1:
             raise ValueError('备份不属于当前项目或版本不受支持')
+        included_paths = data.get('included_move_paths', [])
+        if (not isinstance(included_paths, list) or len(included_paths) > 256
+                or any(not isinstance(path, str) for path in included_paths)
+                or not set(included_paths).issubset({item['path'] for item in data['files']})):
+            raise ValueError('备份随包文件路径不完整')
         for item in data['files']:
-            self._check_write_path(item['path'])
+            self._check_write_path(item['path'], included_paths)
         return rel, data
 
     def transactions(self):
@@ -272,7 +298,7 @@ class Storage:
         if conflicts:
             raise FileConflict('write_conflict' if transaction else 'source_conflict', conflicts, transaction)
 
-    def _check_write_path(self, relative):
+    def _check_write_path(self, relative, included_paths=()):
         p = self.path(relative)
         parts = PurePosixPath(relative).parts
         first = parts[0]
@@ -296,6 +322,9 @@ class Storage:
             file_name(parts[-1], '.ico')
             return p
         if first == 'datafiles':
+            if relative in included_paths:
+                included_file_path(relative)
+                return p
             if len(parts) < 3 or parts[1] != 'fonts':
                 raise ValueError('只允许写入 datafiles/fonts：' + relative)
             return p
@@ -311,14 +340,14 @@ class Storage:
             raise ValueError('不是本服务支持的资源路径：' + relative)
         return p
 
-    def commit(self, changes, before, dry_run=False, recovery=False):
+    def commit(self, changes, before, dry_run=False, recovery=False, *, included_move_paths=()):
         with self.lock:
             if not self.writable and not dry_run:
                 raise ValueError('服务以只读模式启动')
             if not set(changes).issubset(before):
                 raise ValueError('变更缺少原文件快照')
             for rel in changes:
-                self._check_write_path(rel)
+                self._check_write_path(rel, included_move_paths)
             changes = {rel: value for rel, value in changes.items() if value != before[rel]}
             if changes and not dry_run and not recovery and any(
                     t['status'] in ('prepared', 'writing', 'recovery_required') for t in self.transactions()):
@@ -334,6 +363,8 @@ class Storage:
             txid = uuid.uuid4().hex
             directory = f'.codex/gms2-resource-backups/{txid}'
             manifest = {'version': 1, 'project': str(self.yyp), 'status': 'prepared', 'files': summary}
+            if included_move_paths:
+                manifest['included_move_paths'] = sorted(set(included_move_paths) & changes.keys())
             for rel in changes:
                 if before[rel] is not None:
                     self._write(f'{directory}/before/{rel}', before[rel])
@@ -347,7 +378,13 @@ class Storage:
                 for rel, data in changes.items():
                     if self.snapshot([rel])[rel] != before[rel]:
                         raise ValueError('提交时检测到外部修改：' + rel)
-                    self._write(rel, data)
+                    if rel in included_move_paths and before[rel] is None:
+                        try:
+                            self._write(rel, data, exclusive=True)
+                        except FileExistsError as exc:
+                            raise ValueError('提交时目标已被外部创建：' + rel) from exc
+                    else:
+                        self._write(rel, data)
                     written.append(rel)
                 self.verify_files({row['path']: row['after_sha256'] for row in summary}, transaction=txid)
                 manifest['status'] = 'committed'
@@ -366,7 +403,10 @@ class Storage:
                     try:
                         if self.snapshot([rel])[rel] != changes[rel]:
                             raise ValueError('回滚前检测到外部修改')
-                        self._write(rel, before[rel])
+                        if rel in included_move_paths and changes[rel] is None:
+                            self._write(rel, before[rel], exclusive=True)
+                        else:
+                            self._write(rel, before[rel])
                     except Exception:
                         failed.append(rel)
                 manifest['status'] = 'recovery_required' if failed else 'rolled_back'
@@ -399,7 +439,8 @@ class Storage:
                     if digest(old) != item['before_sha256']:
                         raise ValueError('备份内容损坏：' + rel)
                 changes[rel] = old
-            result = self.commit(changes, before, dry_run=dry_run, recovery=True)
+            result = self.commit(changes, before, dry_run=dry_run, recovery=True,
+                                 included_move_paths=manifest.get('included_move_paths', ()))
             if not dry_run:
                 manifest['status'] = 'restored'
                 self._write(manifest_rel, encode(manifest))

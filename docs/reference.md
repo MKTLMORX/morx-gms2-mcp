@@ -6,7 +6,7 @@
 
 ## 工具清单
 
-共 105 个工具。先按工具名发现所需接口，再查看该接口的参数，避免把整套声明打印进上下文。公共流程由 `server_info.usage` 返回，初始化只保留入口提示。参数类型与默认值可由 MCP 客户端查询；以下说明常用流程和限制。
+共 107 个工具。先按工具名发现所需接口，再查看该接口的参数，避免把整套声明打印进上下文。公共流程由 `server_info.usage` 返回，初始化只保留入口提示。参数类型与默认值可由 MCP 客户端查询；以下说明常用流程和限制。
 
 | 工具 | 功能 |
 | --- | --- |
@@ -107,6 +107,8 @@
 | `create_audio_group` | 按项目哈希创建普通音频组，默认预览 |
 | `configure_audio_export` | 批量配置声音/音频组导出目录并报告生效关系 |
 | `import_font` | 将 TTF/TTE/OTF/TTC 作为 IncludedFile 导入 datafiles/fonts |
+| `register_png_included_files` | 按原相对路径和目标平台批量登记已有 PNG |
+| `move_included_files` | 批量迁移已登记的随包文件，保留平台掩码并支持整批撤销 |
 | `create_shader` | 创建 GLSL ES 顶点/片段源文件 |
 | `create_tileset` | 从精灵创建瓦片集 |
 | `inspect_tileset` | 查询瓦片尺寸、列数、瓦片数和引用 |
@@ -248,7 +250,9 @@ install_runtime_bridge → run_game → runtime_status → capture_game / inspec
 
 排队也可取消，准备线程退出后才清理。一个会话失败不会替换其他会话，旧编号不重新分配。保留最多32条历史会话（只淘汰已停止且清理完成、测试已结束的记录），重要日志和报告须先导出。接口上限不代表已在本机实测8个客户端的负载。
 
-### 异步保存、加载与系统事件
+### 异步图片、保存加载与系统事件
+
+`AsyncImageLoaded`（Other / 60）使用 `number=0` 登记。`sprite_add_ext` 完成后用 `async_load[? "id"]` 匹配请求返回的精灵 ID，`status` 非负表示成功、负数表示失败。可通过 `read_code`、`update_code` 和 `remove_object_event` 管理事件。测试序列和 `trigger_game_event` 拒绝手动触发此回调。[GameMaker Image Loaded 事件](https://manual.gamemaker.io/monthly/en/The_Asset_Editors/Object_Properties/Async_Events/Image_Loaded.htm)
 
 `AsyncSaveLoad`（Other / 72）和 `AsyncSystem`（Other / 75）支持 `add_object_event`、`read_code`、`update_code`、`remove_object_event` 的统一事件身份，调用时 `number=0`。`server_info.async_events` 公布原生编号。创建默认仅预览，已有事件拒绝覆盖；更新仍需读取到的 SHA256。
 
@@ -515,6 +519,26 @@ Windows 中，流式声音使用自身目录；非流式自定义组按组目录
 事件支持 Create、Destroy、Step/BeginStep/EndStep、Draw/DrawGUI/DrawBegin/DrawEnd/DrawGUIBegin/DrawGUIEnd、CleanUp、RoomStart/RoomEnd，以及 Alarm 0～11、User 0～15。Alarm/User 通过 `event` 与 `number` 分别指定。
 
 PNG 支持 1～256 帧，每帧尺寸相同、单文件最多 64 MiB、单边最多 8192。声音最多 128 MiB：WAV 为单/双声道 8/16/24 位 PCM；OGG 为单/双声道 Vorbis，服务读取采样率、声道和时长。字体支持 TTF/TTE/OTF/TTC，最多 64 MiB，作为 `datafiles/fonts` 下的 IncludedFile 导入，不烘焙 GMFont 资源。原始导入文件不修改。`configure_object` 中 null 表示保留，sprite/parent 空字符串表示清空。
+
+#### 随包发布的 PNG
+
+先把单张 PNG 放在项目的 `datafiles/` 下，再调用 `register_png_included_files`。每项可选择 `Windows`、`Android` 或两者，平台位涵盖相应 VM 与 YYC。工具保留子目录和图片字节，仅修改工程清单。
+
+```json
+{"files":[{"path":"datafiles/atlas/tile/card.png","platforms":["Windows"]},{"path":"datafiles/atlas/detail/card.png","platforms":["Android"]}],"dry_run":true}
+```
+
+提交时传相同参数、预览返回的 `plan_sha256`（作为 `expected_plan_sha256`）和 `dry_run=false`。用每项返回的 `runtime_path` 读取文件，例如 `atlas/tile/card.png`。同路径同平台可重复登记，平台不同或路径大小写冲突时整批拒绝。最多 128 项，单文件最多 16 MiB，整批最多 64 MiB，单边最多 4096 像素。可按事务撤销登记，PNG 仍保留在原目录。
+
+#### 迁移随包文件
+
+`move_included_files` 迁移已登记的 Included Files，包括 PNG 和字体。源和目标都使用 `datafiles/` 开头的项目相对路径。预览返回旧、新运行时路径、源文件 SHA-256 和原平台掩码。
+
+```json
+{"moves":[{"source_path":"datafiles/preview/card.png","destination_path":"datafiles/atlas/detail/card.png"}],"dry_run":true}
+```
+
+提交时传入相同的 `moves`、预览返回的 `plan_sha256`（作为 `expected_plan_sha256`）和 `dry_run=false`。哈希变化或目标已被占用时整批拒绝。支持最多 128 项，单项最多 64 MiB，整批最多 128 MiB，迁移前后保留扩展名。源和目标不能重叠，含配置覆盖的源登记暂不支持。一个事务号可以一起撤销文件迁移和清单变更。GML 中的旧路径需按预览报告另行更新。
 
 ### 纹理组与缩小采样
 

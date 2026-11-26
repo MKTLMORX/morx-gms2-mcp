@@ -10,7 +10,7 @@ from PIL import Image
 from . import audio
 from . import schemas
 from . import tiles as tile_storage
-from .storage import Storage, digest, encode, parse_yy
+from .storage import Storage, digest, encode, included_file_path, parse_yy
 from .animation import number, timeline, retime, geometry, resize_geometry, automatic_bounds
 from .display import WINDOWS_PATH, WINDOWS_FLAGS, VIEW_FIELDS, windows_settings, room_settings, check_expected
 from .display import integer, boolean, title_check
@@ -32,6 +32,7 @@ EVENTS = {'Create': (0, 0, 'Create'), 'Destroy': (1, 0, 'Destroy'),
           'AnimationEnd': (7, 7, 'Other'), 'NoMoreLives': (7, 6, 'Other'),
           'NoMoreHealth': (7, 9, 'Other'), 'EndOfPath': (7, 8, 'Other'),
           'Outside': (7, 0, 'Other'), 'Boundary': (7, 1, 'Other'),
+          'AsyncImageLoaded': (7, 60, 'Other'),
           'AsyncNetworking': (7, 68, 'Other'), 'Networking': (7, 68, 'Other'),
           'AsyncSaveLoad': (7, 72, 'Other'), 'AsyncSystem': (7, 75, 'Other')}
 EVENT_STEMS = {0: 'Create', 1: 'Destroy', 2: 'Alarm', 3: 'Step', 4: 'Collision', 5: 'Keyboard',
@@ -77,7 +78,7 @@ def trigger_spec(event, number=0, collision_object=None):
         raise ValueError('Draw 事件不能由运行期事件触发器执行')
     if (typ, num) == (7, 68):
         raise ValueError('Networking 由真实网络回调触发，不能用事件触发器伪造 async_load')
-    if (typ, num) in {(7, 72), (7, 75)}:
+    if (typ, num) in {(7, 60), (7, 72), (7, 75)}:
         raise ValueError('异步事件由真实 IO 或系统回调触发，不能用事件触发器伪造 async_load')
     if event == 'Collision':
         return 4, 0, collision
@@ -208,6 +209,14 @@ class Edit:
         if self.group_plan is not None:
             result['group_plan'] = self.group_plan
         return result
+
+
+def _included_file_index(entries):
+    index = {}
+    for entry in entries:
+        folder = entry['filePath'].replace('\\', '/').rstrip('/')
+        index.setdefault(f'{folder}/{entry["name"]}'.casefold(), []).append(entry)
+    return index
 
 
 class Project(Storage):
@@ -1666,6 +1675,163 @@ class Project(Storage):
                            'sha256': digest(raw), 'settings': audio.settings(data),
                            'notes': audio.notes(data), 'compiled': False})
             return result
+
+    def register_png_included_files(self, files, expected_plan_sha256=None, dry_run=True):
+        """登记项目 datafiles 下已有的 PNG。只写工程清单。"""
+        platform_bits = {'Windows': 0x40 | 0x100000, 'Android': 0x08 | 0x200000}  # VM / YYC
+        if not isinstance(files, list) or not 1 <= len(files) <= 128:
+            raise ValueError('files 须包含 1～128 个 PNG 文件')
+        if not dry_run and expected_plan_sha256 is None:
+            raise ValueError('请先预览，并提供返回的 plan_sha256')
+        requests, used = [], set()
+        for item in files:
+            if not isinstance(item, dict) or set(item) != {'path', 'platforms'}:
+                raise ValueError('每项须提供 path 和 platforms')
+            path = included_file_path(item['path'])
+            relative = path.as_posix()
+            if path.suffix.lower() != '.png':
+                raise ValueError('须提供 datafiles 下的 PNG 相对路径：' + relative)
+            platforms = item['platforms']
+            if (not isinstance(platforms, list) or not 1 <= len(platforms) <= 2
+                    or any(not isinstance(p, str) or p not in platform_bits for p in platforms)
+                    or len(set(platforms)) != len(platforms)):
+                raise ValueError('platforms 须为 Windows、Android 或两者：' + relative)
+            key = relative.casefold()
+            if key in used:
+                raise ValueError('PNG 路径重复：' + relative)
+            used.add(key)
+            requests.append((path, sorted(platforms), sum(platform_bits[p] for p in platforms)))
+
+        with self.lock:
+            edit = Edit(self)
+            project = edit.load(self.yyp.name)
+            if project.get('ConfigValues'):
+                raise ValueError('项目含配置覆盖，暂不登记 PNG')
+            included = project.setdefault('IncludedFiles', [])
+            registered = _included_file_index(included)
+
+            results, total_bytes = [], 0
+            max_file, max_batch = 16 * 1024**2, 64 * 1024**2
+            for path, platforms, mask in requests:
+                relative = path.as_posix()
+                existing = registered.get(relative.casefold(), [])
+                if existing and (len(existing) != 1 or existing[0].get('CopyToMask') != mask
+                                 or existing[0].get('filePath') != path.parent.as_posix()
+                                 or existing[0].get('name') != path.name or existing[0].get('ConfigValues')):
+                    raise ValueError('PNG 已登记且原路径、平台或配置不一致：' + relative)
+
+                source = self.path(relative)
+                if not source.is_file():
+                    raise ValueError('项目内 PNG 不存在：' + relative)
+                limit = min(max_file, max_batch - total_bytes)
+                with source.open('rb') as file:
+                    raw = file.read(limit + 1)
+                if len(raw) > limit:
+                    raise ValueError('PNG 单文件最多 16 MiB，整批最多 64 MiB：' + relative)
+                try:
+                    with Image.open(io.BytesIO(raw), formats=['PNG']) as image:
+                        if max(image.size) > 4096 or image.is_animated:
+                            raise ValueError('只支持单张、单边最多 4096 像素的 PNG：' + relative)
+                        width, height = image.size
+                        image.load()
+                except (OSError, SyntaxError, Image.DecompressionBombError) as exc:
+                    raise ValueError('PNG 无法解码：' + relative) from exc
+                total_bytes += len(raw)
+                edit.before[relative] = raw
+                if not existing:
+                    included.append({'$GMIncludedFile': '', '%Name': path.name, 'CopyToMask': mask,
+                                     'filePath': path.parent.as_posix(), 'name': path.name,
+                                     'resourceType': 'GMIncludedFile', 'resourceVersion': '2.0'})
+                results.append({'project_path': relative, 'runtime_path': path.relative_to('datafiles').as_posix(),
+                                'platforms': platforms, 'platform_mask': mask, 'sha256': digest(raw),
+                                'width': width, 'height': height, 'already_registered': bool(existing)})
+
+            plan_sha256 = digest(encode({'project_sha256': digest(edit.before[self.yyp.name]), 'files': results}))
+            if expected_plan_sha256 is not None and expected_plan_sha256 != plan_sha256:
+                raise ValueError('工程清单、PNG 或登记参数已变化，请重新预览')
+            if any(not row['already_registered'] for row in results):
+                edit.save(self.yyp.name, project, preserve_trailing=True)
+            return {**edit.commit(dry_run), 'included_files': results, 'plan_sha256': plan_sha256}
+
+    def move_included_files(self, moves, expected_plan_sha256=None, dry_run=True):
+        """保留已登记文件的字节和平台配置，迁移目录及登记。"""
+        from .android_bridge import MARKER_FILE
+
+        if not isinstance(moves, list) or not 1 <= len(moves) <= 128:
+            raise ValueError('moves 须包含 1～128 个随包文件')
+        if not dry_run and expected_plan_sha256 is None:
+            raise ValueError('请先预览，并提供返回的 plan_sha256')
+        requests, paths = [], {}
+        for item in moves:
+            if not isinstance(item, dict) or set(item) != {'source_path', 'destination_path'}:
+                raise ValueError('每项须提供 source_path 和 destination_path')
+            source = included_file_path(item['source_path'])
+            destination = included_file_path(item['destination_path'])
+            if source.suffix.casefold() != destination.suffix.casefold():
+                raise ValueError('迁移前后须保持文件扩展名：' + source.as_posix())
+            for path in (source, destination):
+                key = path.as_posix().casefold()
+                if path.name.casefold() in {MARKER_FILE, 'licence.plist', 'local_settings.json', 'morx-android-signing.json'}:
+                    raise ValueError('不能迁移桥接或本机配置文件：' + path.as_posix())
+                if key in paths:
+                    raise ValueError('批次中的源文件和目标文件不能重叠：' + path.as_posix())
+                paths[key] = path
+            requests.append((source, destination))
+        for path in paths.values():
+            if any(parent.as_posix().casefold() in paths for parent in path.parents):
+                raise ValueError('批次中的文件路径不能同时作为目录：' + path.as_posix())
+
+        with self.lock:
+            edit = Edit(self)
+            project = edit.load(self.yyp.name)
+            if project.get('ConfigValues'):
+                raise ValueError('项目含配置覆盖，暂不迁移随包文件')
+            registered = _included_file_index(project.get('IncludedFiles', []))
+            results, total_bytes = [], 0
+            for source, destination in requests:
+                src, dst = source.as_posix(), destination.as_posix()
+                entries = registered.get(src.casefold(), [])
+                if (len(entries) != 1 or entries[0]['name'] != source.name
+                        or entries[0]['filePath'].replace('\\', '/').rstrip('/') != source.parent.as_posix()
+                        or entries[0].get('resourceType') != 'GMIncludedFile'):
+                    raise ValueError('源文件须有唯一且路径一致的原生随包登记：' + src)
+                entry = entries[0]
+                mask = entry.get('CopyToMask')
+                if type(mask) is not int or not -(2**63) <= mask < 2**63 or entry.get('ConfigValues'):
+                    raise ValueError('源登记的平台掩码无效或含配置覆盖：' + src)
+                if dst.casefold() in registered:
+                    raise ValueError('目标路径已有随包登记：' + dst)
+                target = self.path(dst)
+                if target.exists() or any(parent.exists() and not parent.is_dir() for parent in target.parents):
+                    raise ValueError('目标文件已存在或父路径不是目录：' + dst)
+                source_file = self.path(src)
+                if not source_file.is_file():
+                    raise ValueError('随包源文件不存在：' + src)
+                limit = min(64 * 1024**2, 128 * 1024**2 - total_bytes)
+                with source_file.open('rb') as file:
+                    raw = file.read(limit + 1)
+                if len(raw) > limit:
+                    raise ValueError('随包文件单项最多 64 MiB，整批最多 128 MiB：' + src)
+                total_bytes += len(raw)
+                edit.before[src], edit.before[dst] = raw, None
+                edit.changes[dst] = raw
+                entry['filePath'], entry['name'] = destination.parent.as_posix(), destination.name
+                if '%Name' in entry and source.name != destination.name:
+                    entry['%Name'] = destination.name
+                results.append({'source_path': src, 'destination_path': dst,
+                                'old_runtime_path': source.relative_to('datafiles').as_posix(),
+                                'runtime_path': destination.relative_to('datafiles').as_posix(),
+                                'platform_mask': mask, 'sha256': digest(raw), 'bytes': len(raw)})
+
+            plan_sha256 = digest(encode({'project_sha256': digest(edit.before[self.yyp.name]), 'moves': results}))
+            if expected_plan_sha256 is not None and expected_plan_sha256 != plan_sha256:
+                raise ValueError('工程清单、源文件或迁移参数已变化，请重新预览')
+            # Prepare destinations, switch the manifest, then remove the old files.
+            edit.save(self.yyp.name, project, preserve_trailing=True)
+            edit.changes.update((source.as_posix(), None) for source, _ in requests)
+            result = self.commit(edit.changes, edit.before, dry_run=dry_run,
+                                 included_move_paths={path.as_posix() for path in paths.values()})
+            return {**result, 'moves': results, 'plan_sha256': plan_sha256}
 
     def import_font(self, name, font_path, dry_run=False):
         """把字体文件作为 IncludedFile 放入 datafiles/fonts；不生成烘焙 GMFont。"""

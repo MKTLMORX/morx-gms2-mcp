@@ -5,7 +5,7 @@ from tests.test_core import ProjectFixture
 
 class NetworkingTests(ProjectFixture):
     def test_save_load_and_system_transactions(self):
-        for name, number in [('AsyncSaveLoad', 72), ('AsyncSystem', 75)]:
+        for name, number in [('AsyncImageLoaded', 60), ('AsyncSaveLoad', 72), ('AsyncSystem', 75)]:
             with self.subTest(event=name):
                 before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
                 self.project.add_event('obj_network', name, '// preview\n', dry_run=True)
@@ -29,7 +29,7 @@ class NetworkingTests(ProjectFixture):
                 self.assertTrue(self.project.validate()['ok'])
 
     def test_async_events_reject_manual_trigger_and_arbitrary_numbers(self):
-        for name, number in [('AsyncSaveLoad', 72), ('AsyncSystem', 75)]:
+        for name, number in [('AsyncImageLoaded', 60), ('AsyncSaveLoad', 72), ('AsyncSystem', 75)]:
             self.assertEqual(event_spec(name, 0), (7, number, 'Other', None))
             with self.assertRaises(ValueError):
                 event_spec(name, number)

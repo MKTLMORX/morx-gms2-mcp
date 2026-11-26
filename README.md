@@ -22,7 +22,7 @@
 
 ## 功能
 
-105 个工具，覆盖项目制作与运行检查。支持 Codex、Claude Code 等本地 MCP 客户端。
+107 个工具，覆盖项目制作与运行检查。支持 Codex、Claude Code 等本地 MCP 客户端。
 
 | 领域 | 支持的操作 |
 | --- | --- |
@@ -114,7 +114,7 @@ $gameProject = 'D:\Games\MyGame'
 ## 文档与支持
 
 - [安装与客户端配置](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/setup.md)：pipx、源码安装、升级、运行环境和连接排查。
-- [工具与用法](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/reference.md)：全部 105 个工具、导出配置、纹理与音频设置、运行诊断及支持限制。
+- [工具与用法](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/docs/reference.md)：全部 107 个工具、导出配置、纹理与音频设置、运行诊断及支持限制。
 - [更新记录](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/CHANGELOG.md) · [报告问题](https://github.com/MKTLMORX/morx-gms2-mcp/issues) · [贡献指南](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/CONTRIBUTING.md) · [安全说明](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/SECURITY.md)
 
 独立社区项目，与 GameMaker 官方无隶属关系。采用 [MIT 许可证](https://github.com/MKTLMORX/morx-gms2-mcp/blob/main/LICENSE)。

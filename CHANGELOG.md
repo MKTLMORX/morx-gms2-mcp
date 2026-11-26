@@ -1,5 +1,10 @@
 # 更新记录
 
+## 未发布
+
+- 支持批量迁移已登记的 Included Files，保留文件字节与平台掩码，文件迁移和登记更新可一起预览、核对哈希和撤销。
+- 支持登记 `AsyncImageLoaded` 对象事件，并将 `datafiles` 中已有的 PNG 按原相对路径批量登记为 Included Files，可逐项选择 Windows 和 Android。
+
 ## 0.7.2 — 2026-11-21
 
 - 资源写入后回读磁盘，发现覆盖时列出文件并保留事务备份。Windows 编译/运行和 Android 打包在启动编译器前复核这批改动及隔离快照。

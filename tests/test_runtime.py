@@ -875,7 +875,7 @@ class RuntimeTests(ProjectFixture):
             server = build_server(self.root, runtime_options=self.options)
         async def verify():
             tools = await server.list_tools()
-            self.assertEqual(len(tools), 105)
+            self.assertEqual(len(tools), 107)
             for tool in tools:
                 if not tool.annotations.readOnlyHint:
                     self.assertTrue(tool.inputSchema['properties']['dry_run']['default'])

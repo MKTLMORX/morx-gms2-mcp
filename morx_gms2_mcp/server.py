@@ -126,7 +126,8 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
                                  'preview_tool': 'inspect_runtime_snapshot', 'compile_verified': True},
             'async_events': [{'name': name, 'event_type': 7, 'event_number': number,
                               'manual_trigger': False}
-                             for name, number in [('AsyncNetworking', 68), ('AsyncSaveLoad', 72), ('AsyncSystem', 75)]],
+                             for name, number in [('AsyncImageLoaded', 60), ('AsyncNetworking', 68),
+                                                  ('AsyncSaveLoad', 72), ('AsyncSystem', 75)]],
             'networking_event': {'name': 'AsyncNetworking', 'aliases': ['Networking'],
                                  'manual_trigger': False, 'runtime_verified': True,
                                  'verified_transport': 'local WebSocket (ws); not WSS'},
@@ -917,6 +918,7 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
                          collision_object: str | None = None, dry_run: bool = True) -> dict:
         """新增事件，不覆盖；常用命名见 server_info。
         Networking 异步事件使用 AsyncNetworking（别名 Networking），number=0。
+        sprite_add_ext 的图片加载回调使用 AsyncImageLoaded，number=0。
         保存/加载使用 AsyncSaveLoad，系统回调使用 AsyncSystem，number=0；不支持手动触发异步回调。
         Collision 用 collision_object 指定目标物体；Keyboard/KeyPress/KeyRelease 和 Mouse 用 number。
         """
@@ -1061,6 +1063,24 @@ def build_server(project_root: Path, writable=False, runtime_options: RuntimeOpt
         这不会烘焙 GMFont 资源；返回 runtime_path 和 font_add 调用示例，供项目在运行时加载。
         """
         return project.import_font(name, font_path, dry_run)
+
+    @mcp.tool(annotations=add)
+    @background
+    def register_png_included_files(files: list[dict], expected_plan_sha256: str | None = None,
+                                    dry_run: bool = True) -> dict:
+        """批量登记 datafiles 下已有的 PNG，每项为 {path, platforms}，平台可选 Windows、Android 或两者。
+        保留子目录和源图片，返回运行时相对路径。执行时用 expected_plan_sha256 固定预览结果，整批可撤销。
+        """
+        return project.register_png_included_files(files, expected_plan_sha256, dry_run)
+
+    @mcp.tool(annotations=change)
+    @background
+    def move_included_files(moves: list[dict], expected_plan_sha256: str | None = None,
+                            dry_run: bool = True) -> dict:
+        """批量迁移已有 Included Files，每项提供 datafiles 内的 source_path 和 destination_path。
+        保留字节和平台掩码，目标须空闲。提交须传预览的 plan_sha256，文件和登记可整批撤销。
+        """
+        return project.move_included_files(moves, expected_plan_sha256, dry_run)
 
     @mcp.tool(annotations=read)
     @background
